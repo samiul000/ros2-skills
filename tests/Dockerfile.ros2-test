@@ -86,8 +86,14 @@ print('rosidl & ament_cmake repos:', list(keep.keys()))"; \
       echo "[overlay] packages staged in src/:"; \
       ls src; \
       echo "[overlay] colcon build (output redirected to /tmp/colcon.log; summary printed at end)"; \
+      # --packages-up-to hardware_interface: we only need find_package(hardware_interface) \
+      # to resolve in test_hw_pkg. Building controller_manager / ros2_control_node etc. \
+      # exposes us to ABI mismatches in unrelated binary apt packages (e.g. \
+      # libdiagnostic_updater rebuilt against unreleased rclcpp symbols). Limiting the \
+      # build closes that surface entirely. \
       colcon build --merge-install \
         --install-base /opt/ros/${ROS_DISTRO} \
+        --packages-up-to hardware_interface \
         --event-handlers console_direct- console_cohesion- console_start_end+ console_stderr+ status- summary+ \
         --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
         > /tmp/colcon.log 2>&1 \
