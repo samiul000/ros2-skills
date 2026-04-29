@@ -38,8 +38,8 @@ RUN apt-get update \
        python3-vcstool python3-yaml \
        ros-${ROS_DISTRO}-hardware-interface \
        ros-${ROS_DISTRO}-ros2-control \
+    && apt-get install -y \
        ros-${ROS_DISTRO}-rmw-cyclonedds-cpp \
-       ros-${ROS_DISTRO}-cyclonedds \
     && if [ "${ROS_DISTRO}" = "rolling" ]; then \
          echo "[apt] upgrading pre-baked ros-rolling-* packages to current"; \
          pkgs=$(dpkg-query -W -f='${Package}\n' | grep '^ros-rolling-' || true); \
@@ -47,6 +47,9 @@ RUN apt-get update \
            DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade $pkgs; \
          fi; \
        fi \
+    && echo "[apt] verifying libddsc presence" \
+    && ldconfig \
+    && (ldconfig -p | grep -i libddsc || ls -la /opt/ros/${ROS_DISTRO}/lib/libdds* 2>/dev/null || echo "libddsc not found in standard paths") \
     && pip3 install hypothesis 2>/dev/null \
     || pip3 install --break-system-packages hypothesis \
     && rm -rf /var/lib/apt/lists/*
