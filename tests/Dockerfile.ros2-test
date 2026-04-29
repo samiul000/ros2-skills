@@ -78,7 +78,7 @@ keep = {k: v for k, v in d.get('repositories', {}).items() if 'rosidl' in k.lowe
 yaml.safe_dump({'repositories': keep}, open('rosidl.repos', 'w')); \
 print('rosidl & ament_cmake repos:', list(keep.keys()))"; \
       echo "[overlay] vcs import"; \
-      vcs import --quiet src < rosidl.repos; \
+      vcs import src < rosidl.repos; \
       echo "[overlay] cloning ros-controls repos"; \
       git clone --quiet --depth=1 https://github.com/ros-controls/ros2_control_cmake.git src/ros2_control_cmake; \
       git clone --quiet --depth=1 https://github.com/ros-controls/control_msgs.git src/control_msgs; \
