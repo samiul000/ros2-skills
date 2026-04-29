@@ -21,12 +21,30 @@ SHELL ["/bin/bash", "-c"]
 # Humble (22.04) pip doesn't support --break-system-packages; Jazzy+ (24.04) requires it.
 # git/curl/python3-vcstool/python3-yaml are needed for the rolling-only
 # source overlay below.
+#
+# On rolling we additionally upgrade every pre-baked `ros-rolling-*` package
+# in the base image. Reason: the base image was built with an older rclcpp
+# (and friends) baked in, but the newly-installed downstream packages
+# (e.g. pal_statistics, diagnostic_updater, control_msgs, hardware_interface)
+# have already been rebuilt against a newer rclcpp ABI on packages.ros.org.
+# Without this upgrade, downstream link steps fail with "undefined reference
+# to rclcpp::ok(...)" / "rclcpp::experimental::IntraProcessManager::..." —
+# the new binaries reference symbols the old rclcpp doesn't export. The
+# upgrade brings every pre-baked ROS apt package up to its current published
+# version so the whole installed set is mutually consistent.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3-pytest python3-pip \
        git ca-certificates build-essential cmake curl \
        python3-vcstool python3-yaml \
        ros-${ROS_DISTRO}-hardware-interface \
        ros-${ROS_DISTRO}-ros2-control \
+    && if [ "${ROS_DISTRO}" = "rolling" ]; then \
+         echo "[apt] upgrading pre-baked ros-rolling-* packages to current"; \
+         pkgs=$(dpkg-query -W -f='${Package}\n' | grep '^ros-rolling-' || true); \
+         if [ -n "$pkgs" ]; then \
+           DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade $pkgs; \
+         fi; \
+       fi \
     && pip3 install hypothesis 2>/dev/null \
     || pip3 install --break-system-packages hypothesis \
     && rm -rf /var/lib/apt/lists/*
