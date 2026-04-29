@@ -38,8 +38,6 @@ RUN apt-get update \
        python3-vcstool python3-yaml \
        ros-${ROS_DISTRO}-hardware-interface \
        ros-${ROS_DISTRO}-ros2-control \
-    && apt-get install -y \
-       ros-${ROS_DISTRO}-rmw-cyclonedds-cpp \
     && if [ "${ROS_DISTRO}" = "rolling" ]; then \
          echo "[apt] upgrading pre-baked ros-rolling-* packages to current"; \
          pkgs=$(dpkg-query -W -f='${Package}\n' | grep '^ros-rolling-' || true); \
@@ -47,25 +45,9 @@ RUN apt-get update \
            DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade $pkgs; \
          fi; \
        fi \
-    && echo "[apt] verifying libddsc presence" \
-    && ldconfig \
-    && (ldconfig -p | grep -i libddsc || ls -la /opt/ros/${ROS_DISTRO}/lib/libdds* 2>/dev/null || echo "libddsc not found in standard paths") \
     && pip3 install hypothesis 2>/dev/null \
     || pip3 install --break-system-packages hypothesis \
     && rm -rf /var/lib/apt/lists/*
-
-# Force Cyclone DDS as the RMW backend.
-#
-# Reason: our rolling overlay rebuilds rosidl_typesupport_fastrtps from
-# upstream source on top of /opt/ros/rolling. The source HEAD's ABI does
-# not necessarily match the apt-installed librmw_fastrtps_cpp.so, so
-# dlopen(rmw_fastrtps_cpp) at runtime fails with `failed to load any RMW
-# implementations`. Cyclone DDS uses a separate typesupport line
-# (rosidl_typesupport_cyclonedds_cpp, not in our overlay) and is therefore
-# unaffected. We set this for every distro because Cyclone DDS is Tier 1
-# on humble / jazzy / rolling and the choice is behaviourally inert for
-# our scaffold smoke tests.
-ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
 # Replace broken rolling binary CMake configs by source-overlaying their
 # upstream source trees on top of /opt/ros/rolling.
@@ -110,9 +92,10 @@ RUN if [ "${ROS_DISTRO}" = "rolling" ]; then \
       curl -fsSL https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos -o ros2.repos; \
       python3 -c "import yaml; \
 d = yaml.safe_load(open('ros2.repos')); \
-keep = {k: v for k, v in d.get('repositories', {}).items() if 'rosidl' in k.lower() or 'ament_cmake' in k.lower()}; \
+allow = lambda k: ('rosidl' in k.lower() or 'ament_cmake' in k.lower()) and 'typesupport' not in k.lower() and 'rosidl_python' not in k.lower() and 'rosidl_runtime_py' not in k.lower() and 'rosidl_dds' not in k.lower(); \
+keep = {k: v for k, v in d.get('repositories', {}).items() if allow(k)}; \
 yaml.safe_dump({'repositories': keep}, open('rosidl.repos', 'w')); \
-print('rosidl & ament_cmake repos:', list(keep.keys()))"; \
+print('overlay repos (typesupport/python/dds excluded to preserve binary ABI):', list(keep.keys()))"; \
       echo "[overlay] vcs import"; \
       vcs import src < rosidl.repos; \
       echo "[overlay] cloning ros-controls repos"; \
