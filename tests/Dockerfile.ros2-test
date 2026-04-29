@@ -45,13 +45,24 @@ SHELL ["/bin/bash", "-c"]
 # do not undergo this kind of in-place refactor.
 RUN if [ "${ROS_DISTRO}" = "rolling" ]; then \
       set -ex; \
-      for f in /etc/apt/sources.list.d/ros2*.list; do \
-        [ -f "$f" ] || continue; \
+      echo '--- apt source files before pinning ---'; \
+      ls -la /etc/apt/sources.list.d/ || true; \
+      files=$(grep -rlE 'packages\.ros\.org/ros2/ubuntu' /etc/apt/ 2>/dev/null || true); \
+      if [ -z "$files" ]; then \
+        echo "FATAL: no apt source file references packages.ros.org/ros2/ubuntu"; \
+        echo "Contents of /etc/apt/sources.list.d/:"; \
+        for f in /etc/apt/sources.list.d/*; do \
+          [ -e "$f" ] && echo "--- $f ---" && cat "$f"; \
+        done; \
+        exit 1; \
+      fi; \
+      for f in $files; do \
         echo "Pinning $f to snapshot ${ROLLING_SNAPSHOT}"; \
         sed -i \
-          -e "s|http://packages.ros.org/ros2/ubuntu|http://snapshots.ros.org/rolling/${ROLLING_SNAPSHOT}/ubuntu|g" \
-          -e "s|https://packages.ros.org/ros2/ubuntu|http://snapshots.ros.org/rolling/${ROLLING_SNAPSHOT}/ubuntu|g" \
+          -e "s|http://packages\.ros\.org/ros2/ubuntu|http://snapshots.ros.org/rolling/${ROLLING_SNAPSHOT}/ubuntu|g" \
+          -e "s|https://packages\.ros\.org/ros2/ubuntu|http://snapshots.ros.org/rolling/${ROLLING_SNAPSHOT}/ubuntu|g" \
           "$f"; \
+        echo "--- after pinning: $f ---"; \
         cat "$f"; \
       done; \
     fi
