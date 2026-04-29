@@ -215,46 +215,49 @@ and which combinations are CI-verified end-to-end.
 | **Jazzy Jalisco** (LTS) | Primary target — recommended | Full pipeline (lint → unit → docker build → colcon test → smoke) | All scripts, scaffolds, and references default to Jazzy idioms |
 | **Humble Hawksbill** (LTS) | Fully supported | Full pipeline | Distro-aware code paths handle 22.04 / older rosidl / pre-`HardwareComponentInterfaceParams` API |
 | **Kilted Kaiju** (non-LTS, May 2025) | Reference-supported | Not in docker matrix (no `osrf/ros:kilted-desktop` image) | Zenoh Tier 1, EventsExecutor stable — references document the deltas |
-| **Rolling Ridley** | Reference only — **not in CI** | Not gated | See **Rolling caveat** below |
+| **Rolling Ridley** | CI-verified against a date-pinned apt snapshot | Full pipeline (pinned via `ROLLING_SNAPSHOT` build-arg) | See **Rolling caveat** below |
 | **Foxy Fitzroy** (LTS, EOL June 2023) | Migration reference only | Not built | Documented for upgrade paths only |
 
 ### Rolling caveat
 
 `Rolling` is, by ROS 2 policy, an upstream development distribution with no
-ABI guarantees. During active refactors (e.g., the ongoing `rosidl` split
-into `rosidl_buffer`, `rosidl_buffer_backend`, …), `packages.ros.org`
-periodically enters states where freshly-rebuilt binary `.deb` files (e.g.
-`control_msgs`, `hardware_interface`) declare CMake link-interface targets
-whose providing packages have not yet propagated as standalone debs. This
-makes `find_package(hardware_interface)` fail at CMake generate time with
-`"target was not found"` errors that cannot be resolved purely from a
-downstream consumer — the broken state is upstream, in apt itself.
+ABI guarantees. During active refactors (e.g., the in-progress `rosidl`
+split into `rosidl_buffer`, `rosidl_buffer_backend`, …), `packages.ros.org`
+periodically enters states where freshly-rebuilt binary `.deb` files
+(e.g. `control_msgs`, `hardware_interface`) declare CMake link-interface
+targets whose providing packages have not yet propagated as standalone
+debs — making `find_package(hardware_interface)` fail at CMake generate
+time with `"target was not found"`.
 
-**That is why rolling is intentionally excluded from this project's CI
-matrix.** Chasing transient upstream packaging gaps in our test pipeline
-produces false negatives that have nothing to do with this skill's
-correctness. We track only what we can guarantee: the LTS distros where
-the binary apt repo is internally consistent.
+This project handles that by **pinning rolling's apt source to a
+date-stamped snapshot** from
+[`snapshots.ros.org`](http://snapshots.ros.org/), via the
+`ROLLING_SNAPSHOT` build-arg in
+[tests/Dockerfile.ros2-test](tests/Dockerfile.ros2-test). The snapshot is
+chosen from a date where the package set is internally consistent
+(currently `2026-04-23`, immediately before the in-progress rosidl
+restructure landed in apt). When upstream ships a coherent release, the
+snapshot date is bumped — no other change is required.
 
-If you want to run on rolling anyway, the canonical workarounds are:
+For your own deployments on rolling:
 
-1. **Pin apt to a known-good snapshot.** Replace `packages.ros.org/ros2/ubuntu`
-   in your apt sources with a date-stamped snapshot from
-   [`snapshots.ros.org`](http://snapshots.ros.org/) chosen from before the
-   restructure window.
-2. **Source-overlay the missing rosidl sub-packages.** Clone
-   `github.com/ros2/rosidl` (and any sibling rosidl repos appearing in
-   `ros2.repos`), then run `colcon build --merge-install --install-base
-   /opt/ros/rolling` so source-built `Config.cmake` files supply the
-   targets the binaries reference.
-3. **Build `control_msgs` + `ros2_control` from source.** Their
-   regenerated CMake configs will correctly call `find_dependency()` for
-   whatever the current source tree depends on, eliminating the binary
-   `.deb` mismatch.
+1. **Recommended — pin apt to a snapshot.** Edit
+   `/etc/apt/sources.list.d/ros2*.list` and replace
+   `http://packages.ros.org/ros2/ubuntu` with
+   `http://snapshots.ros.org/rolling/<YYYY-MM-DD>/ubuntu` for a date that
+   predates any in-progress restructure. This is exactly what this
+   project's CI does.
+2. **Alternative — source-overlay the missing sub-packages.** Clone
+   `github.com/ros2/rosidl` and any sibling rosidl repos appearing in
+   `ros2.repos`, then `colcon build --merge-install --install-base
+   /opt/ros/rolling` to supply the targets the binaries reference.
+3. **Heaviest — build `control_msgs` + `ros2_control` from source.**
+   Their regenerated CMake configs will reflect the current source
+   tree, eliminating the binary `.deb` mismatch entirely.
 
-For production work, **pick an LTS (Humble or Jazzy)**. Use rolling only
-when you specifically need a feature that has not yet landed in an LTS,
-and accept that builds may break across upstream restructures.
+For production work, **pick an LTS (Humble or Jazzy)**. Use rolling
+only when you specifically need a feature that has not yet landed in
+an LTS.
 
 ## Contributing
 

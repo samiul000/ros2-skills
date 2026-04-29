@@ -1,26 +1,60 @@
 # Dockerfile for testing ROS 2 code examples across distros.
 #
 # Build args:
-#   ROS_DISTRO  — humble | jazzy (default: jazzy)
-#
-# This image is gated in CI for the LTS distros only. `rolling` is omitted
-# because upstream binary apt packages periodically reference yet-unreleased
-# CMake targets (the ongoing rosidl split is one example), which is not a
-# bug in this project and not something we can resolve from a downstream CI.
-# See README → "Rolling caveat" for guidance on running on rolling locally.
+#   ROS_DISTRO         — humble | jazzy | rolling (default: jazzy)
+#   ROLLING_SNAPSHOT   — date-stamped snapshot to pin rolling apt against,
+#                        format YYYY-MM-DD (default: 2026-04-23, the most
+#                        recent date verified to predate the in-progress
+#                        rosidl split that introduced unreleased
+#                        rosidl_buffer / rosidl_buffer_backend CMake link
+#                        targets in control_msgs and hardware_interface).
+#                        Bump this once upstream ships a complete release
+#                        of those packages alongside their consumers.
 #
 # Usage:
 #   docker build -f tests/Dockerfile.ros2-test --build-arg ROS_DISTRO=humble -t ros2-test:humble .
 #   docker run --rm ros2-test:humble
 
 ARG ROS_DISTRO=jazzy
+ARG ROLLING_SNAPSHOT=2026-04-23
 FROM osrf/ros:${ROS_DISTRO}-desktop
 
-# Re-declare ARG after FROM (Docker scoping rules)
+# Re-declare ARGs after FROM (Docker scoping rules)
 ARG ROS_DISTRO
+ARG ROLLING_SNAPSHOT
 ENV ROS_DISTRO=${ROS_DISTRO}
+ENV ROLLING_SNAPSHOT=${ROLLING_SNAPSHOT}
 ENV DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-c"]
+
+# Pin the apt source on rolling to a known-good date snapshot.
+#
+# Why: `packages.ros.org/ros2/ubuntu` is a rolling pointer that is
+# periodically inconsistent during multi-package refactors (e.g. the
+# 2026-04-25 rosidl split rebuilt control_msgs and hardware_interface
+# against rosidl_buffer / rosidl_buffer_backend, but those companion
+# packages had not yet propagated as standalone debs — making
+# `find_package(hardware_interface)` fail with "target was not found"
+# at any consumer's CMake configure step). `snapshots.ros.org` mirrors
+# packages.ros.org daily and lets us pick a date where the package set
+# is internally consistent. Once upstream ships a coherent release we
+# bump ROLLING_SNAPSHOT and the build moves forward — no other change
+# is required.
+#
+# Humble/Jazzy use the rolling pointer normally because LTS distros
+# do not undergo this kind of in-place refactor.
+RUN if [ "${ROS_DISTRO}" = "rolling" ]; then \
+      set -ex; \
+      for f in /etc/apt/sources.list.d/ros2*.list; do \
+        [ -f "$f" ] || continue; \
+        echo "Pinning $f to snapshot ${ROLLING_SNAPSHOT}"; \
+        sed -i \
+          -e "s|http://packages.ros.org/ros2/ubuntu|http://snapshots.ros.org/rolling/${ROLLING_SNAPSHOT}/ubuntu|g" \
+          -e "s|https://packages.ros.org/ros2/ubuntu|http://snapshots.ros.org/rolling/${ROLLING_SNAPSHOT}/ubuntu|g" \
+          "$f"; \
+        cat "$f"; \
+      done; \
+    fi
 
 # osrf/ros:*-desktop already includes pytest, colcon, rclcpp, rosidl, etc.
 # Install ros2_control for hardware_interface package testing.
