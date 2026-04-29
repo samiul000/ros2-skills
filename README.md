@@ -215,7 +215,7 @@ and which combinations are CI-verified end-to-end.
 | **Jazzy Jalisco** (LTS) | Primary target — recommended | Full pipeline (lint → unit → docker build → colcon test → smoke) | All scripts, scaffolds, and references default to Jazzy idioms |
 | **Humble Hawksbill** (LTS) | Fully supported | Full pipeline | Distro-aware code paths handle 22.04 / older rosidl / pre-`HardwareComponentInterfaceParams` API |
 | **Kilted Kaiju** (non-LTS, May 2025) | Reference-supported | Not in docker matrix (no `osrf/ros:kilted-desktop` image) | Zenoh Tier 1, EventsExecutor stable — references document the deltas |
-| **Rolling Ridley** | CI-verified against a date-pinned apt snapshot | Full pipeline (pinned via `ROLLING_SNAPSHOT` build-arg) | See **Rolling caveat** below |
+| **Rolling Ridley** | CI-verified via source overlay of broken upstream packages | Full pipeline (rolling-only stage in Dockerfile) | See **Rolling caveat** below |
 | **Foxy Fitzroy** (LTS, EOL June 2023) | Migration reference only | Not built | Documented for upgrade paths only |
 
 ### Rolling caveat
@@ -229,31 +229,22 @@ targets whose providing packages have not yet propagated as standalone
 debs — making `find_package(hardware_interface)` fail at CMake generate
 time with `"target was not found"`.
 
-This project handles that by **pinning rolling's apt source to a
-date-stamped snapshot** from
-[`snapshots.ros.org`](http://snapshots.ros.org/), via the
-`ROLLING_SNAPSHOT` build-arg in
-[tests/Dockerfile.ros2-test](tests/Dockerfile.ros2-test). The snapshot is
-chosen from a date where the package set is internally consistent
-(currently `2026-04-23`, immediately before the in-progress rosidl
-restructure landed in apt). When upstream ships a coherent release, the
-snapshot date is bumped — no other change is required.
+This project handles that with a **source overlay** in
+[tests/Dockerfile.ros2-test](tests/Dockerfile.ros2-test): on rolling
+only, after the broken binaries are apt-installed, we clone every
+upstream repo whose source tree currently underpins the broken Config
+chain (every `rosidl*` repo from the canonical `ros2.repos` manifest,
+plus `ros-controls/control_msgs` and `ros-controls/ros2_control`) and
+`colcon build --merge-install --install-base /opt/ros/rolling` them as
+one workspace. The regenerated `Config.cmake` files reference each
+other consistently and overlay onto `/opt/ros/rolling`, replacing the
+broken binary configs in place. A throwaway `find_package(hardware_interface)`
+verification at the end of the overlay step fails fast if anything
+remains unresolved.
 
-For your own deployments on rolling:
-
-1. **Recommended — pin apt to a snapshot.** Edit
-   `/etc/apt/sources.list.d/ros2*.list` and replace
-   `http://packages.ros.org/ros2/ubuntu` with
-   `http://snapshots.ros.org/rolling/<YYYY-MM-DD>/ubuntu` for a date that
-   predates any in-progress restructure. This is exactly what this
-   project's CI does.
-2. **Alternative — source-overlay the missing sub-packages.** Clone
-   `github.com/ros2/rosidl` and any sibling rosidl repos appearing in
-   `ros2.repos`, then `colcon build --merge-install --install-base
-   /opt/ros/rolling` to supply the targets the binaries reference.
-3. **Heaviest — build `control_msgs` + `ros2_control` from source.**
-   Their regenerated CMake configs will reflect the current source
-   tree, eliminating the binary `.deb` mismatch entirely.
+For your own deployments on rolling, the same approach applies — clone
+the `rosidl*`/`control_msgs`/`ros2_control` source trees and overlay
+them with `colcon build --merge-install`.
 
 For production work, **pick an LTS (Humble or Jazzy)**. Use rolling
 only when you specifically need a feature that has not yet landed in
