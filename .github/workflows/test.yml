@@ -63,6 +63,12 @@ jobs:
 
   # -------------------------------------------------------
   # Job 3: ROS 2 distro integration tests (Docker-based)
+  #
+  # Only LTS distros are gated. `rolling` is upstream development with no ABI
+  # guarantees and has been observed to ship binary CMake configs that
+  # reference unreleased link-interface targets (rosidl_buffer*) — that is an
+  # upstream packaging gap, not a project bug, and chasing it in CI produces
+  # false negatives. Rolling guidance lives in README → "Rolling caveat".
   # -------------------------------------------------------
   ros2-integration:
     runs-on: ubuntu-latest
@@ -70,7 +76,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ros_distro: [humble, jazzy, rolling]
+        ros_distro: [humble, jazzy]
     steps:
       - uses: actions/checkout@v6
 

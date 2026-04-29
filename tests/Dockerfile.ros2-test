@@ -1,7 +1,13 @@
 # Dockerfile for testing ROS 2 code examples across distros.
 #
 # Build args:
-#   ROS_DISTRO  — humble | jazzy | rolling (default: jazzy)
+#   ROS_DISTRO  — humble | jazzy (default: jazzy)
+#
+# This image is gated in CI for the LTS distros only. `rolling` is omitted
+# because upstream binary apt packages periodically reference yet-unreleased
+# CMake targets (the ongoing rosidl split is one example), which is not a
+# bug in this project and not something we can resolve from a downstream CI.
+# See README → "Rolling caveat" for guidance on running on rolling locally.
 #
 # Usage:
 #   docker build -f tests/Dockerfile.ros2-test --build-arg ROS_DISTRO=humble -t ros2-test:humble .
@@ -19,132 +25,13 @@ SHELL ["/bin/bash", "-c"]
 # osrf/ros:*-desktop already includes pytest, colcon, rclcpp, rosidl, etc.
 # Install ros2_control for hardware_interface package testing.
 # Humble (22.04) pip doesn't support --break-system-packages; Jazzy+ (24.04) requires it.
-# python3-vcstool + curl + python3-yaml are needed by the rolling-only rosidl
-# overlay step below.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3-pytest python3-pip \
-       git ca-certificates build-essential cmake curl \
-       python3-vcstool python3-yaml \
        ros-${ROS_DISTRO}-hardware-interface \
        ros-${ROS_DISTRO}-ros2-control \
     && pip3 install hypothesis 2>/dev/null \
     || pip3 install --break-system-packages hypothesis \
     && rm -rf /var/lib/apt/lists/*
-
-# Resolve transient rosidl packaging gap on rolling.
-#
-# Background:
-#   `rolling` is upstream development. As of late April 2026, the rosidl
-#   stack is being split into multiple sub-packages spread across several
-#   ros2/* repositories (e.g. `rosidl_buffer` lives in `ros2/rosidl`, but
-#   `rosidl_buffer_backend` lives in a sibling repo). `ros-rolling-
-#   control-msgs` (>= 6.9.0) and `ros-rolling-hardware-interface`
-#   (>= 6.7.0) are rebuilt against this split, so their installed CMake
-#   configs declare link-interface targets like `rosidl_buffer::*` and
-#   `rosidl_buffer_backend::*`. However, those Debian binaries have not
-#   propagated to packages.ros.org as standalone debs yet — so any
-#   consumer that calls `find_package(hardware_interface)` fails at CMake
-#   generate time with "target was not found".
-#
-# Strategy:
-#   Use the canonical `ros2.repos` source manifest (the same file
-#   `ros2/ros2` ships for full source builds). Filter it down to every
-#   repository whose name contains `rosidl` — that catches `ros2/rosidl`,
-#   `ros2/rosidl_core`, `ros2/rosidl_dynamic_typesupport`,
-#   `ros2/rosidl_typesupport`, `ros2/rosidl_python`, etc. — without
-#   hardcoding repo names that may change as upstream restructures
-#   continue. `vcs import` materialises them, then `colcon build
-#   --merge-install --install-base /opt/ros/rolling` overlays the
-#   source-built Config.cmake files and IMPORTED targets on top of the
-#   binary install. Whichever rosidl sub-package supplies any missing
-#   link target (today: rosidl_buffer + rosidl_buffer_backend) gets
-#   pulled in automatically.
-#
-# After the build, verify that the previously-missing target actually
-# resolves now, and fail fast with a diagnostic listing if it does not —
-# that converts opaque downstream CMake errors into an actionable signal
-# at the layer where the fix belongs.
-#
-# This step is a no-op on humble/jazzy where the rosidl split does not
-# exist and binary configs are internally consistent.
-RUN if [ "${ROS_DISTRO}" = "rolling" ]; then \
-      set -ex; \
-      source /opt/ros/${ROS_DISTRO}/setup.bash; \
-      mkdir -p /tmp/rosidl_ws/src; \
-      cd /tmp/rosidl_ws; \
-      curl -fsSL https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos \
-        -o ros2.repos; \
-      python3 -c "import yaml; \
-d = yaml.safe_load(open('ros2.repos')); \
-repos = d.get('repositories', {}); \
-keep = {k: v for k, v in repos.items() if 'rosidl' in k.lower()}; \
-yaml.safe_dump({'repositories': keep}, open('rosidl-only.repos', 'w')); \
-print('Selected rosidl-related repositories:'); \
-[print(f'  - {k}') for k in keep]"; \
-      vcs import src < rosidl-only.repos; \
-      colcon build \
-        --merge-install \
-        --install-base /opt/ros/${ROS_DISTRO} \
-        --cmake-args -DCMAKE_BUILD_TYPE=Release \
-                     -DBUILD_TESTING=OFF; \
-      echo '--- post-overlay sanity check ---'; \
-      for cfg in rosidl_buffer rosidl_buffer_backend; do \
-        if [ -f "/opt/ros/${ROS_DISTRO}/share/${cfg}/cmake/${cfg}Config.cmake" ]; then \
-          echo "OK: ${cfg}Config.cmake installed"; \
-        else \
-          echo "MISSING: ${cfg}Config.cmake — search the overlay tree:"; \
-          find /opt/ros/${ROS_DISTRO}/share -maxdepth 2 -name "${cfg}*" 2>/dev/null || true; \
-          exit 1; \
-        fi; \
-      done; \
-      rm -rf /tmp/rosidl_ws; \
-    fi
-
-# Patch binary CMake configs that declare link-interface targets without
-# the matching find_dependency() calls.
-#
-# Even after the rosidl overlay supplies rosidl_buffer_backendConfig.cmake,
-# a downstream find_package(hardware_interface) still fails at the export
-# targets include because hardware_interface's
-# ament_cmake_export_dependencies-extras.cmake (auto-generated when the
-# binary .deb was built) does not call find_dependency for the
-# newly-introduced rosidl_buffer_backend dep. CMake therefore never has a
-# chance to create the IMPORTED rosidl_buffer_backend::rosidl_buffer_backend
-# target, and set_target_properties on hardware_interface::hardware_interface
-# fails with:
-#   "The link interface ... contains:
-#    rosidl_buffer_backend::rosidl_buffer_backend
-#    but the target was not found."
-#
-# Append the missing find_dependency() calls to each binary *-extras.cmake
-# whose cmake/ tree references the buffer targets, but only when they are
-# not already present so the patch is idempotent and self-deactivates once
-# upstream ships the fix. Then verify by running cmake against a throwaway
-# project that does just `find_package(hardware_interface REQUIRED)` — if
-# the chain now resolves cleanly, downstream consumers will succeed too.
-RUN if [ "${ROS_DISTRO}" = "rolling" ]; then \
-      set -ex; \
-      source /opt/ros/${ROS_DISTRO}/setup.bash; \
-      echo '--- patching missing find_package() in binary cmake configs ---'; \
-      for share_dir in /opt/ros/${ROS_DISTRO}/share/hardware_interface \
-                       /opt/ros/${ROS_DISTRO}/share/control_msgs; do \
-        deps_extras="${share_dir}/cmake/ament_cmake_export_dependencies-extras.cmake"; \
-        [ -f "${deps_extras}" ] || continue; \
-        for dep in rosidl_buffer rosidl_buffer_backend; do \
-          if grep -rq "${dep}::" "${share_dir}/cmake/" 2>/dev/null && \
-             ! grep -qE "find_(package|dependency)\(${dep}" "${deps_extras}"; then \
-            echo "  + patch ${deps_extras}: find_package(${dep})"; \
-            printf '\n# Added by Dockerfile.ros2-test: upstream rolling binary omitted this dep.\n# Using find_package (always available) rather than find_dependency, since\n# the binary *-extras.cmake does not include(CMakeFindDependencyMacro).\nfind_package(%s QUIET)\n' "${dep}" \
-              >> "${deps_extras}"; \
-          fi; \
-        done; \
-      done; \
-      echo '--- verifying find_package(hardware_interface) now resolves ---'; \
-      mkdir -p /tmp/fp_check && cd /tmp/fp_check; \
-      printf 'cmake_minimum_required(VERSION 3.16)\nproject(fp_check LANGUAGES CXX)\nfind_package(hardware_interface REQUIRED)\nget_target_property(_hi_libs hardware_interface::hardware_interface INTERFACE_LINK_LIBRARIES)\nmessage(STATUS "hardware_interface link interface OK; libs: ${_hi_libs}")\n' > CMakeLists.txt; \
-      cmake -S . -B build -DCMAKE_BUILD_TYPE=Release; \
-      cd / && rm -rf /tmp/fp_check; \
-    fi
 
 WORKDIR /ws/ros2-engineering-skills
 COPY . .
