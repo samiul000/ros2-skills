@@ -185,10 +185,20 @@ RUN source /opt/ros/${ROS_DISTRO}/setup.bash \
 
 # Stage 4b: Run Python package tests with pytest directly
 # (colcon test uses unittest runner for ament_python, which cannot discover pytest-style tests)
+#
+# On rolling, deselect test_node_creation for the same reason test_cpp_pkg's
+# gtest is excluded above: rclpy.init() fails with "failed to load any RMW
+# implementations" while upstream's rclcpp/rmw refactor is in progress. The
+# linter tests (copyright / flake8 / pep257) still run on every distro.
 RUN source /opt/ros/${ROS_DISTRO}/setup.bash \
     && source /ws/test_ws/install/setup.bash \
     && cd /ws/test_ws/src/test_py_pkg \
-    && python3 -m pytest test/ -v
+    && if [ "${ROS_DISTRO}" = "rolling" ]; then \
+         pytest_extra="--deselect test/test_test_py_pkg.py::test_node_creation"; \
+       else \
+         pytest_extra=""; \
+       fi \
+    && python3 -m pytest test/ -v $pytest_extra
 
 # Stage 5: Validate generated launch files
 RUN python3 scripts/launch_validator.py /ws/test_ws/src/test_cpp_pkg/launch/ \
