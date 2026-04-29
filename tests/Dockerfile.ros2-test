@@ -47,7 +47,9 @@ RUN if [ "${ROS_DISTRO}" = "rolling" ]; then \
       set -ex; \
       echo '--- apt source files before pinning ---'; \
       ls -la /etc/apt/sources.list.d/ || true; \
-      files=$(grep -rlE 'packages\.ros\.org/ros2/ubuntu' /etc/apt/ 2>/dev/null || true); \
+      # -R (capital) so symlinks like ros2.sources -> /usr/share/ros-apt-source/ros2.sources \
+      # are followed during the recursive search. \
+      files=$(grep -RlE 'packages\.ros\.org/ros2/ubuntu' /etc/apt/ 2>/dev/null || true); \
       if [ -z "$files" ]; then \
         echo "FATAL: no apt source file references packages.ros.org/ros2/ubuntu"; \
         echo "Contents of /etc/apt/sources.list.d/:"; \
@@ -56,7 +58,11 @@ RUN if [ "${ROS_DISTRO}" = "rolling" ]; then \
         done; \
         exit 1; \
       fi; \
-      for f in $files; do \
+      # Resolve symlinks to their underlying files and dedupe — sed -i on a \
+      # symlink can replace the link with a regular file on some GNU sed \
+      # versions, so always edit the real path. \
+      real_files=$(for f in $files; do readlink -f "$f"; done | sort -u); \
+      for f in $real_files; do \
         echo "Pinning $f to snapshot ${ROLLING_SNAPSHOT}"; \
         sed -i \
           -e "s|http://packages\.ros\.org/ros2/ubuntu|http://snapshots.ros.org/rolling/${ROLLING_SNAPSHOT}/ubuntu|g" \
@@ -65,6 +71,12 @@ RUN if [ "${ROS_DISTRO}" = "rolling" ]; then \
         echo "--- after pinning: $f ---"; \
         cat "$f"; \
       done; \
+      echo '--- verifying pin took effect ---'; \
+      if grep -RE 'packages\.ros\.org/ros2/ubuntu' /etc/apt/ /usr/share/ros-apt-source/ 2>/dev/null; then \
+        echo "FATAL: still see packages.ros.org references after pinning"; \
+        exit 1; \
+      fi; \
+      echo 'apt pin OK'; \
     fi
 
 # osrf/ros:*-desktop already includes pytest, colcon, rclcpp, rosidl, etc.
