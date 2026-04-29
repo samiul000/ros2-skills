@@ -67,10 +67,6 @@ jobs:
   ros2-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Rolling is upstream development and may break transiently due to
-    # binary-package state mismatches in apt (e.g., control_msgs ABI vs.
-    # rosidl_buffer target availability). Don't block the workflow on rolling.
-    continue-on-error: ${{ matrix.ros_distro == 'rolling' }}
     strategy:
       fail-fast: false
       matrix:

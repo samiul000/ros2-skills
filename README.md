@@ -206,11 +206,37 @@ ros2-engineering-skills/
 
 ## Supported ROS 2 distributions
 
-- **Jazzy Jalisco** (LTS, recommended) — primary target
-- **Kilted Kaiju** (non-LTS, May 2025) — Zenoh Tier 1, EventsExecutor stable
-- **Humble Hawksbill** (LTS) — fully supported
-- **Foxy Fitzroy** (LTS, EOL June 2023) — referenced for legacy migration
-- **Rolling Ridley** — latest features, noted where they diverge
+This skill is designed to work **on a complete, internally consistent ROS 2
+installation**. The matrix below describes what "complete" means per distro,
+and which combinations are CI-verified end-to-end.
+
+| Distro | Status | CI verification | Notes |
+|---|---|---|---|
+| **Jazzy Jalisco** (LTS) | Primary target — recommended | Full pipeline (lint → unit → docker build → colcon test → smoke) | All scripts, scaffolds, and references default to Jazzy idioms |
+| **Humble Hawksbill** (LTS) | Fully supported | Full pipeline | Distro-aware code paths handle 22.04 / older rosidl / pre-`HardwareComponentInterfaceParams` API |
+| **Kilted Kaiju** (non-LTS, May 2025) | Reference-supported | Not in docker matrix (no `osrf/ros:kilted-desktop` image) | Zenoh Tier 1, EventsExecutor stable — references document the deltas |
+| **Rolling Ridley** | Best-effort | Full pipeline, with rosidl source overlay | See **Rolling caveat** below |
+| **Foxy Fitzroy** (LTS, EOL June 2023) | Migration reference only | Not built | Documented for upgrade paths only |
+
+### Rolling caveat
+
+`Rolling` is, by ROS 2 policy, an upstream development distribution with no
+ABI guarantees. During active refactors (e.g., the ongoing `rosidl` split
+into `rosidl_buffer`, `rosidl_buffer_backend`, …), it is normal for
+`packages.ros.org` to be in a transient state where binary `.deb` files
+reference CMake targets whose providing packages have not yet propagated.
+
+This project's CI handles that case in
+[tests/Dockerfile.ros2-test](tests/Dockerfile.ros2-test) by cloning the
+upstream `ros2/rosidl` repository on rolling and overlaying it onto the
+system ROS prefix via `colcon build --merge-install`, so the source tree
+authoritatively supplies any missing `rosidl_*::*` targets. **For your own
+deployments**, the same approach (or pinning to a known-good apt snapshot
+date) is recommended whenever rolling is mid-restructure.
+
+For production work, **pick an LTS (Humble or Jazzy)**. Use rolling only
+when you specifically need a feature that has not yet landed in an LTS,
+and accept that builds may break across upstream restructures.
 
 ## Contributing
 

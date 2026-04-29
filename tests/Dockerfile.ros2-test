@@ -21,11 +21,52 @@ SHELL ["/bin/bash", "-c"]
 # Humble (22.04) pip doesn't support --break-system-packages; Jazzy+ (24.04) requires it.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3-pytest python3-pip \
+       git ca-certificates build-essential cmake \
        ros-${ROS_DISTRO}-hardware-interface \
        ros-${ROS_DISTRO}-ros2-control \
     && pip3 install hypothesis 2>/dev/null \
     || pip3 install --break-system-packages hypothesis \
     && rm -rf /var/lib/apt/lists/*
+
+# Resolve transient rosidl packaging gap on rolling.
+#
+# Background:
+#   `rolling` is upstream development. As of late April 2026, the rosidl
+#   stack is being split into multiple sub-packages (`rosidl_buffer`,
+#   `rosidl_buffer_backend`, ...). `ros-rolling-control-msgs` (>= 6.9.0) and
+#   `ros-rolling-hardware-interface` (>= 6.7.0) are rebuilt against this
+#   split, so their installed CMake configs declare link-interface targets
+#   like `rosidl_buffer::rosidl_buffer` and
+#   `rosidl_buffer_backend::rosidl_buffer_backend`. However, those Debian
+#   binaries have not propagated to packages.ros.org yet — so any consumer
+#   that calls `find_package(hardware_interface)` fails at CMake generate
+#   time with "target was not found".
+#
+# Strategy:
+#   The upstream `ros2/rosidl` repository contains every sub-package the
+#   binary control_msgs/hardware_interface configs reference. Cloning that
+#   repository and `colcon build`-ing it with `--merge-install` over the
+#   binary install layer at `/opt/ros/rolling` makes the source-built
+#   sub-packages authoritative — both Config.cmake files and target
+#   definitions become discoverable, resolving every missing link target
+#   (rosidl_buffer, rosidl_buffer_backend, and any future siblings) in one
+#   pass without enumerating them by name.
+#
+# This step is a no-op on humble/jazzy where the rosidl split does not
+# exist and binary configs are internally consistent.
+RUN if [ "${ROS_DISTRO}" = "rolling" ]; then \
+      set -eux; \
+      source /opt/ros/${ROS_DISTRO}/setup.bash; \
+      mkdir -p /tmp/rosidl_ws/src; \
+      git clone --depth=1 https://github.com/ros2/rosidl.git /tmp/rosidl_ws/src/rosidl; \
+      cd /tmp/rosidl_ws; \
+      colcon build \
+        --merge-install \
+        --install-base /opt/ros/${ROS_DISTRO} \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release \
+                     -DBUILD_TESTING=OFF; \
+      rm -rf /tmp/rosidl_ws; \
+    fi
 
 WORKDIR /ws/ros2-engineering-skills
 COPY . .
