@@ -76,6 +76,7 @@ keep = {k: v for k, v in d.get('repositories', {}).items() if 'rosidl' in k.lowe
 yaml.safe_dump({'repositories': keep}, open('rosidl.repos', 'w')); \
 print('rosidl repos:', list(keep.keys()))"; \
       vcs import src < rosidl.repos; \
+      git clone --depth=1 https://github.com/ros-controls/ros2_control_cmake.git src/ros2_control_cmake; \
       git clone --depth=1 https://github.com/ros-controls/control_msgs.git src/control_msgs; \
       git clone --depth=1 https://github.com/ros-controls/ros2_control.git src/ros2_control; \
       colcon build --merge-install \
