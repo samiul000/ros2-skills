@@ -125,16 +125,16 @@ print('Selected rosidl-related repositories:'); \
 RUN if [ "${ROS_DISTRO}" = "rolling" ]; then \
       set -ex; \
       source /opt/ros/${ROS_DISTRO}/setup.bash; \
-      echo '--- patching missing find_dependency() in binary cmake configs ---'; \
+      echo '--- patching missing find_package() in binary cmake configs ---'; \
       for share_dir in /opt/ros/${ROS_DISTRO}/share/hardware_interface \
                        /opt/ros/${ROS_DISTRO}/share/control_msgs; do \
         deps_extras="${share_dir}/cmake/ament_cmake_export_dependencies-extras.cmake"; \
         [ -f "${deps_extras}" ] || continue; \
         for dep in rosidl_buffer rosidl_buffer_backend; do \
           if grep -rq "${dep}::" "${share_dir}/cmake/" 2>/dev/null && \
-             ! grep -q "find_dependency(${dep}" "${deps_extras}"; then \
-            echo "  + patch ${deps_extras}: find_dependency(${dep})"; \
-            printf '\n# Added by Dockerfile.ros2-test: upstream rolling binary omitted this find_dependency.\nfind_dependency(%s QUIET)\n' "${dep}" \
+             ! grep -qE "find_(package|dependency)\(${dep}" "${deps_extras}"; then \
+            echo "  + patch ${deps_extras}: find_package(${dep})"; \
+            printf '\n# Added by Dockerfile.ros2-test: upstream rolling binary omitted this dep.\n# Using find_package (always available) rather than find_dependency, since\n# the binary *-extras.cmake does not include(CMakeFindDependencyMacro).\nfind_package(%s QUIET)\n' "${dep}" \
               >> "${deps_extras}"; \
           fi; \
         done; \
