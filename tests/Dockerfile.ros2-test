@@ -85,16 +85,25 @@ print('rosidl & ament_cmake repos:', list(keep.keys()))"; \
       git clone --quiet --depth=1 https://github.com/ros-controls/ros2_control.git src/ros2_control; \
       echo "[overlay] packages staged in src/:"; \
       ls src; \
-      echo "[overlay] colcon build (cohesion: per-package summary only)"; \
+      echo "[overlay] colcon build (output redirected to /tmp/colcon.log; summary printed at end)"; \
       colcon build --merge-install \
         --install-base /opt/ros/${ROS_DISTRO} \
-        --event-handlers console_cohesion+ console_stderr+ status- summary+ \
+        --event-handlers console_direct- console_cohesion- console_start_end+ console_stderr+ status- summary+ \
         --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
-        || { echo "[overlay] colcon build FAILED — tail of each failed package log:"; \
+        > /tmp/colcon.log 2>&1 \
+        || { rc=$?; \
+             echo "[overlay] colcon build FAILED (rc=$rc)"; \
+             echo "=== last 300 lines of /tmp/colcon.log ==="; \
+             tail -300 /tmp/colcon.log; \
+             echo "=== per-package logs containing 'error' (tail -120 each) ==="; \
              for f in log/latest_build/*/stdout_stderr.log; do \
-               [ -f "$f" ] && echo "=== $f ===" && tail -150 "$f"; \
+               [ -f "$f" ] && grep -liE '(^|[^a-z])error|cmake error|fatal' "$f" > /dev/null \
+                 && { echo "--- $f ---"; tail -120 "$f"; }; \
              done; \
-             exit 1; }; \
+             exit "$rc"; }; \
+      echo "[overlay] colcon build OK — last 30 lines of /tmp/colcon.log:"; \
+      tail -30 /tmp/colcon.log; \
+      rm -f /tmp/colcon.log; \
       cd / && rm -rf /tmp/overlay_ws; \
       echo "[overlay] verifying find_package(hardware_interface)"; \
       mkdir -p /tmp/fp_check && cd /tmp/fp_check; \
