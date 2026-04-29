@@ -55,7 +55,7 @@ RUN apt-get update \
 # This step is a no-op on humble/jazzy where the rosidl split does not
 # exist and binary configs are internally consistent.
 RUN if [ "${ROS_DISTRO}" = "rolling" ]; then \
-      set -eux; \
+      set -ex; \
       source /opt/ros/${ROS_DISTRO}/setup.bash; \
       mkdir -p /tmp/rosidl_ws/src; \
       git clone --depth=1 https://github.com/ros2/rosidl.git /tmp/rosidl_ws/src/rosidl; \
