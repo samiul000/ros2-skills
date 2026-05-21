@@ -30,7 +30,14 @@ import re
 import sys
 
 
-# Patterns that indicate potential ROS 2 anti-patterns in code being written
+# Patterns that indicate potential ROS 2 anti-patterns in code being written.
+#
+# Optional fields per entry:
+#   pattern_flags  - extra `re` flags (e.g. re.MULTILINE). Default 0.
+#   file_filter    - callable(filename) -> bool; if present, regex only runs
+#                    when the filter returns True. Default: applies to all
+#                    checkable files. Use to scope launch-only or
+#                    ROS-specific patterns to where they are real signals.
 ANTIPATTERN_CHECKS = [
     {
         'pattern': r'time\.sleep\s*\(',
@@ -44,7 +51,12 @@ ANTIPATTERN_CHECKS = [
         'severity': 'warning',
     },
     {
-        'pattern': r'global\s+\w+',
+        # Python `global` is a statement, only valid at the start of a line
+        # inside a function body. Anchoring at line-start eliminates false
+        # positives from identifiers/strings/class attrs containing "global"
+        # (e.g. `dict["global_state"]`, `global_var = 1`).
+        'pattern': r'^[ \t]*global\s+\w+',
+        'pattern_flags': re.MULTILINE,
         'message': 'Global variables break composition — store state as class members',
         'severity': 'warning',
     },
@@ -58,16 +70,22 @@ ANTIPATTERN_CHECKS = [
         'pattern': r'node_executable\s*=',
         'message': 'node_executable is deprecated — use executable instead',
         'severity': 'warning',
+        # Deprecated launch_ros kwarg — only meaningful inside a launch file.
+        # Other Python code may legitimately have an attribute/kwarg of the
+        # same name (e.g. a dataclass `node_executable: str = ...`).
+        'file_filter': lambda fp: fp.endswith('.launch.py'),
     },
     {
         'pattern': r'node_name\s*=',
         'message': 'node_name is deprecated — use name instead',
         'severity': 'warning',
+        'file_filter': lambda fp: fp.endswith('.launch.py'),
     },
     {
         'pattern': r'node_namespace\s*=',
         'message': 'node_namespace is deprecated — use namespace instead',
         'severity': 'warning',
+        'file_filter': lambda fp: fp.endswith('.launch.py'),
     },
 ]
 
@@ -114,12 +132,20 @@ def _is_in_comment(content, pos):
 def check_content(content, filename='<input>'):
     """Check content for ROS 2 anti-patterns.
 
-    Matches inside comments and string literals are skipped to reduce
-    false positives (e.g. a docstring mentioning ``time.sleep()``).
+    Matches inside single-line ``#``/``//`` comments are skipped to reduce
+    false positives (e.g. a docstring mentioning ``time.sleep()``). Patterns
+    with a ``file_filter`` entry only run for files the filter approves —
+    used to scope deprecated-launch-kwarg checks to ``*.launch.py`` only,
+    so that a regular Python module with an attribute named ``node_name``
+    is not falsely flagged.
     """
     issues = []
     for check in ANTIPATTERN_CHECKS:
-        matches = list(re.finditer(check['pattern'], content))
+        file_filter = check.get('file_filter')
+        if file_filter and not file_filter(filename):
+            continue
+        flags = check.get('pattern_flags', 0)
+        matches = list(re.finditer(check['pattern'], content, flags))
         for match in matches:
             if _is_in_comment(content, match.start()):
                 continue

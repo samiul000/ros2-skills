@@ -273,22 +273,68 @@ class TestValidateHookAntiPatterns:
         assert any('ROS_LOCALHOST_ONLY' in i['message'] for i in issues)
 
     def test_detects_deprecated_node_executable(self):
+        # Deprecated launch_ros kwarg - check only fires on .launch.py files
+        # (false-positive guard added 2026-05; see ANTIPATTERN_CHECKS).
         issues = check_content(
-            'Node(node_executable="my_node")', 'test.py')
+            'Node(node_executable="my_node")', 'bringup.launch.py')
         assert len(issues) >= 1
         assert any('deprecated' in i['message'] for i in issues)
 
     def test_detects_deprecated_node_name(self):
         issues = check_content(
-            'Node(node_name="my_node")', 'test.py')
+            'Node(node_name="my_node")', 'bringup.launch.py')
         assert len(issues) >= 1
         assert any('deprecated' in i['message'] for i in issues)
 
     def test_detects_deprecated_node_namespace(self):
         issues = check_content(
-            'Node(node_namespace="/ns")', 'test.py')
+            'Node(node_namespace="/ns")', 'bringup.launch.py')
         assert len(issues) >= 1
         assert any('deprecated' in i['message'] for i in issues)
+
+    def test_deprecated_kwargs_not_flagged_in_non_launch_file(self):
+        """Regression: anti-pattern checks for launch-only kwargs must NOT
+        fire on regular Python files. A dataclass or test fixture happening
+        to use a `node_name=` parameter is not a deprecated launch_ros API."""
+        for kwarg in ('node_name', 'node_executable', 'node_namespace'):
+            src = (f'class Robot:\n'
+                   f'    {kwarg} = "default_robot_name"\n')
+            issues = check_content(src, 'robot.py')
+            assert all('deprecated' not in i['message'] for i in issues), (
+                f'{kwarg} should not be flagged in non-.launch.py files; '
+                f'got: {issues}'
+            )
+
+    def test_global_false_positive_avoided_in_string_literal(self):
+        """Regression: 'global' inside a string literal must NOT be flagged
+        as a global statement. Only the `global X` Python statement counts."""
+        src = 'config = {"global": True, "scope": "process"}\n'
+        issues = check_content(src, 'cfg.py')
+        assert all('Global variables' not in i['message'] for i in issues), (
+            f'string-literal global must not be flagged; got: {issues}'
+        )
+
+    def test_global_statement_still_detected_at_line_start(self):
+        """The legitimate Python `global` statement should still be caught."""
+        src = ('def f():\n'
+               '    global state\n'
+               '    state = 1\n')
+        issues = check_content(src, 'cfg.py')
+        assert any('Global variables' in i['message'] for i in issues), (
+            f'real global statement must still be flagged; got: {issues}'
+        )
+
+    def test_global_identifier_not_at_line_start_not_flagged(self):
+        """An identifier containing 'global' (e.g. `global_var`) is not a
+        `global` statement and must not trigger the warning."""
+        src = ('global_var = 1\n'
+               'my_global = "hi"\n'
+               'x = global_settings.get("x")\n')
+        issues = check_content(src, 'mod.py')
+        assert all('Global variables' not in i['message'] for i in issues), (
+            f'identifier with "global" prefix must not be flagged; '
+            f'got: {issues}'
+        )
 
     def test_clean_code_no_issues(self):
         clean_code = (
