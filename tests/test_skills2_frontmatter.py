@@ -250,3 +250,62 @@ class TestSkills2ClassificationConsistency:
             assert self.fm['deprecation-risk'] == 'low', (
                 'Hybrid skills should have deprecation-risk: low'
             )
+
+
+class TestSkillMdSizeBudget:
+    """Enforce SKILL.md's self-declared size budget.
+
+    README.md tells contributors to keep SKILL.md under 500 lines so that the
+    always-loaded portion of the skill stays small in the agent context
+    window. The file drifted to 527 once before; this test pins the budget so
+    a future contributor cannot quietly blow past it. If you must exceed the
+    limit, raise it deliberately here (with reasoning) — do not delete the
+    assertion.
+    """
+
+    SOFT_LIMIT_LINES = 500
+
+    def test_skill_md_under_500_lines(self):
+        with open(SKILL_MD, 'r', encoding='utf-8') as fh:
+            line_count = sum(1 for _ in fh)
+        assert line_count <= self.SOFT_LIMIT_LINES, (
+            f'SKILL.md has {line_count} lines, exceeds the '
+            f'{self.SOFT_LIMIT_LINES}-line budget declared in README.md. '
+            'Move detail into references/*.md or condense.'
+        )
+
+    def test_quick_cli_reference_moved_to_debugging(self):
+        """Regression: the long CLI cheat sheet must live in debugging.md,
+        not in always-loaded SKILL.md, to keep the size budget realistic.
+        SKILL.md may still mention "Quick reference" as a pointer, but the
+        full command list (>=20 ros2 subcommands) should not be inline."""
+        with open(SKILL_MD, 'r', encoding='utf-8') as fh:
+            skill = fh.read()
+        # Count ros2 introspection commands that the moved section contained.
+        ros2_command_count = sum(
+            1 for cmd in ('ros2 node list', 'ros2 topic info',
+                          'ros2 service list', 'ros2 action list',
+                          'ros2 param list', 'ros2 interface show',
+                          'ros2 control list_controllers',
+                          'ros2 lifecycle list', 'ros2 bag record',
+                          'ros2 bag play')
+            if cmd in skill
+        )
+        assert ros2_command_count <= 2, (
+            f'SKILL.md inlines {ros2_command_count} ros2 commands from the '
+            'cheat sheet; these belong in references/debugging.md §10 to '
+            'preserve always-loaded context budget.'
+        )
+        # And the actual cheat sheet must be reachable.
+        debugging_md = os.path.join(
+            SKILL_ROOT, 'references', 'debugging.md')
+        with open(debugging_md, 'r', encoding='utf-8') as fh:
+            debugging = fh.read()
+        assert 'Quick CLI reference' in debugging, (
+            'Quick CLI reference must live in references/debugging.md'
+        )
+        for must in ('ros2 node list', 'ros2 topic info /topic_name -v',
+                     'ros2 lifecycle list', 'ros2 bag play my_bag --clock'):
+            assert must in debugging, (
+                f'debugging.md is missing CLI reference command: {must!r}'
+            )
