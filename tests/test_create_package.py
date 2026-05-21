@@ -85,16 +85,24 @@ class TestCppPackage:
         Regression test for the `lambda info: info` bug: that matcher returned
         the action object (always truthy), causing ChangeState to fire against
         every lifecycle node in the launch — broken in multi-node bringups.
-        The correct API is launch_ros.events.lifecycle.matches_action(node).
+
+        The correct API is `launch.events.matches_action(node)` — note this
+        lives in `launch.events`, NOT `launch_ros.events.lifecycle`. An earlier
+        version of this scaffolder imported from the wrong module which caused
+        an ImportError at runtime; this test pins the right path. Verified
+        against ros2/launch jazzy source on 2026-05-21.
         """
         run_script("my_robot", "--type", "cpp", "--dest", str(tmp_path))
         launch = (tmp_path / "my_robot" / "launch" / "bringup.launch.py").read_text(encoding="utf-8")
         assert "matches_action" in launch, \
             "lifecycle launch must use matches_action(node) for lifecycle_node_matcher"
         assert "matches_action(node)" in launch
-        assert "from launch_ros.events.lifecycle import" in launch \
-            and "matches_action" in launch.split("from launch_ros.events.lifecycle import")[1].split("\n")[0]
-        # The broken pattern must not reappear.
+        # Pin the correct import module (launch.events, not launch_ros.events.lifecycle).
+        assert "from launch.events import matches_action" in launch, \
+            "matches_action must be imported from launch.events"
+        assert "from launch_ros.events.lifecycle import matches_action" not in launch, \
+            "regression: launch_ros.events.lifecycle does not export matches_action; ImportError at runtime"
+        # The broken truthy-on-anything pattern must not reappear.
         assert "lambda info: info" not in launch, \
             "regression: scaffolder must not emit the truthy-on-anything matcher"
 

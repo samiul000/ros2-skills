@@ -75,9 +75,10 @@ def _generate_launch_file(name: str, lifecycle: bool = False,
 from launch import LaunchDescription
 from launch.actions import EmitEvent, RegisterEventHandler
 from launch.substitutions import PathJoinSubstitution
+from launch.events import matches_action
 from launch_ros.actions import LifecycleNode
 from launch_ros.event_handlers import OnStateTransition
-from launch_ros.events.lifecycle import ChangeState, matches_action
+from launch_ros.events.lifecycle import ChangeState
 from launch_ros.substitutions import FindPackageShare
 import lifecycle_msgs.msg
 
