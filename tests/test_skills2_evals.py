@@ -28,6 +28,11 @@ from eval_runner import (
     evaluate_criteria,
     run_eval,
     run_all_evals,
+    run_parity_test,
+    _term_matches,
+    _extract_criteria_with_weights,
+    _content_path_for_source,
+    _check_deprecation_streak,
 )
 
 
@@ -632,3 +637,519 @@ class TestEvalRunnerCoverage:
         with pytest.raises(SystemExit) as exc_info:
             main()
         assert exc_info.value.code in (0, 1)
+
+
+class TestPrefixMatching:
+    """Morphology-tolerant term matching via _term_matches.
+
+    The previous exact word-boundary matcher failed on basic inflections:
+    a criterion saying 'Must warn about hardcoded paths' did not match an
+    expected file containing 'Hardcoded path' (singular) or 'warning' (no
+    'warn' exact word). The prefix matcher fixes that without an external
+    stemmer, while still avoiding obvious over-matches.
+    """
+
+    def test_exact_match_still_works(self):
+        assert _term_matches('hardcoded', 'avoid hardcoded paths') is True
+
+    def test_plural_to_singular(self):
+        assert _term_matches('paths', 'fix the hardcoded path here') is True
+
+    def test_singular_to_plural(self):
+        assert _term_matches('path', 'fix the hardcoded paths here') is True
+
+    def test_warn_matches_warning_and_warnings(self):
+        assert _term_matches('warn', 'emits a warning when stale') is True
+        assert _term_matches('warn', 'collect warnings from the node') is True
+        assert _term_matches('warnings', 'emits a warning when stale') is True
+
+    def test_warned_to_warn(self):
+        assert _term_matches('warned', 'we warn on every drop') is True
+
+    def test_short_term_uses_exact_match(self):
+        # Below 4 chars: exact word boundary only, no prefix expansion.
+        # Otherwise 'qos' would match 'qoss' or 'qos-thing' over-eagerly.
+        assert _term_matches('qos', 'check qos profile') is True
+        assert _term_matches('qos', 'check qos-profile') is True  # boundary -
+        assert _term_matches('qos', 'check qosprofile') is False  # no bound
+
+    def test_unrelated_words_with_shared_4char_prefix_do_not_match(self):
+        # 'pati' shares 4 chars with 'paths' and 'patient' but neither is
+        # a prefix of the other, so prefix matcher rejects.
+        assert _term_matches('paths', 'this is a patient record') is False
+
+    def test_process_does_not_falsely_match_proces(self):
+        # Common stemmer failure: 'process' minus 's' -> 'proces' (wrong).
+        # Prefix matcher uses the full term, so 'proces' (not a real English
+        # word in our expected texts) is never matched against 'process'.
+        # 'process' itself matches 'processes' correctly.
+        assert _term_matches('process', 'multi-process node') is True
+        assert _term_matches('process', 'spawn three processes') is True
+
+    def test_launch_file_review_eval_now_passes(self):
+        """End-to-end regression for Gemini's exact failure case.
+
+        Before the prefix matcher: 'Must warn about hardcoded paths' had
+        coverage 0.25 because expected text said 'Hardcoded path' (singular)
+        and 'warning' (no 'warn' exact word). After: coverage rises and the
+        eval passes 80% threshold.
+        """
+        config = load_eval_config(EVALS_DIR)
+        result = run_all_evals(
+            config, EVALS_DIR, eval_name='launch-file-review')
+        ev = result['evals'][0]
+        assert ev['status'] == 'pass', \
+            f'launch-file-review must pass post-fix: {ev}'
+        assert ev['pass_rate'] >= 80.0
+
+
+class TestWeightActivation:
+    """eval.yaml `weight` field was previously dead config. After fix:
+    pass rate is weighted, so a single high-weight failure can sink an eval
+    while several low-weight failures may not. Backwards compatible: string
+    criteria default to weight 1.0.
+    """
+
+    def test_extract_weights_from_dicts(self):
+        criteria = [
+            {'description': 'A', 'weight': 2.0},
+            {'description': 'B', 'weight': 0.5},
+            {'description': 'C'},  # missing weight -> default 1.0
+        ]
+        pairs = _extract_criteria_with_weights(criteria)
+        assert pairs == [('A', 2.0), ('B', 0.5), ('C', 1.0)]
+
+    def test_extract_weights_from_strings(self):
+        pairs = _extract_criteria_with_weights(['X', 'Y'])
+        assert pairs == [('X', 1.0), ('Y', 1.0)]
+
+    def test_extract_weights_negative_clamped_to_zero(self):
+        pairs = _extract_criteria_with_weights(
+            [{'description': 'A', 'weight': -1.0}])
+        assert pairs == [('A', 0.0)]
+
+    def test_extract_weights_non_numeric_defaults_to_one(self):
+        pairs = _extract_criteria_with_weights(
+            [{'description': 'A', 'weight': 'high'}])
+        assert pairs == [('A', 1.0)]
+
+    def test_weighted_pass_rate_high_weight_fail_dominates(self, tmp_path):
+        """A weight=10 criterion that fails should drop pass rate below
+        a weight=1 criterion that passes."""
+        prompt = tmp_path / 'p.md'
+        expected = tmp_path / 'e.md'
+        prompt.write_text('prompt content here for size check', encoding='utf-8')
+        # Expected text only addresses the small-weight criterion.
+        expected.write_text(
+            'this expected file describes the small low priority topic '
+            'with extra words to satisfy the three-term minimum',
+            encoding='utf-8')
+        entry = {
+            'name': 'weight_test',
+            'prompt': str(prompt),
+            'expected': str(expected),
+            'criteria': [
+                {'description': 'must address small priority topic words',
+                 'weight': 1.0},
+                {'description': 'must describe critical safety mechanism',
+                 'weight': 10.0},
+            ],
+            'timeout': 1000,
+        }
+        result = run_eval(entry, str(tmp_path))
+        # Weighted: 1.0 passes (small/priority/topic match), 10.0 fails.
+        # weighted_pass_rate = 1/11 ~= 9.1%, far below 80% -> overall fail.
+        assert result['status'] == 'fail'
+        assert result['weighted_total'] == 11.0
+        # passed_criteria counts non-weighted heads for human readability
+        assert result['passed_criteria'] == 1
+        assert result['total_criteria'] == 2
+
+
+class TestCliThresholds:
+    """--min-coverage and --min-pass-rate must be honored end-to-end."""
+
+    def _run_cli(self, *extra_args):
+        return subprocess.run(
+            [sys.executable, EVAL_RUNNER, '--eval-dir', EVALS_DIR,
+             '--json', *extra_args],
+            capture_output=True, text=True,
+        )
+
+    def test_help_lists_thresholds(self):
+        r = subprocess.run(
+            [sys.executable, EVAL_RUNNER, '--help'],
+            capture_output=True, text=True,
+        )
+        assert '--min-coverage' in r.stdout
+        assert '--min-pass-rate' in r.stdout
+        assert 'default: 0.30' in r.stdout
+        assert 'default: 80.0' in r.stdout
+
+    def test_default_thresholds_pass_all(self):
+        r = self._run_cli()
+        assert r.returncode == 0, r.stdout + r.stderr
+        d = json.loads(r.stdout)
+        assert d['summary']['overall_status'] == 'pass'
+
+    def test_strict_pass_rate_can_fail(self):
+        # 100% required: any eval with one off-by-keyword criterion will fail.
+        r = self._run_cli('--min-pass-rate', '100.0')
+        d = json.loads(r.stdout)
+        # Don't assert returncode here — depends on real eval content;
+        # just verify the threshold reached the runner.
+        for ev in d['evals']:
+            if ev['pass_rate'] < 100.0:
+                assert ev['status'] == 'fail', \
+                    f'{ev["name"]} should fail at --min-pass-rate 100'
+
+    def test_invalid_coverage_rejected(self):
+        r = self._run_cli('--min-coverage', '1.5')
+        assert r.returncode == 2
+        assert 'min-coverage' in r.stderr
+
+    def test_invalid_pass_rate_rejected(self):
+        r = self._run_cli('--min-pass-rate', '150')
+        assert r.returncode == 2
+        assert 'min-pass-rate' in r.stderr
+
+
+# Shared fixture helpers for judge / parity tests.
+
+
+def _make_temp_eval_setup(tmp_path, eval_name, prompt_text,
+                          output_text=None, baseline_text=None,
+                          criteria=None, parity_cfg=None):
+    """Create a self-contained eval directory under tmp_path.
+
+    Returns (eval_dir, eval_yaml_path). Caller may invoke run_all_evals
+    / run_parity_test directly against this directory.
+    """
+    eval_dir = tmp_path / 'evals'
+    for sub in ('prompts', 'expected', 'outputs',
+                'outputs_baseline', 'history'):
+        (eval_dir / sub).mkdir(parents=True, exist_ok=True)
+    (eval_dir / 'prompts' / f'{eval_name}.md').write_text(
+        prompt_text, encoding='utf-8')
+    # An expected file is always required (eval.yaml schema requires it).
+    (eval_dir / 'expected' / f'{eval_name}.md').write_text(
+        prompt_text, encoding='utf-8')
+    if output_text is not None:
+        (eval_dir / 'outputs' / f'{eval_name}.md').write_text(
+            output_text, encoding='utf-8')
+    if baseline_text is not None:
+        (eval_dir / 'outputs_baseline' / f'{eval_name}.md').write_text(
+            baseline_text, encoding='utf-8')
+
+    cfg = {
+        'skill': 'test',
+        'version': '0.0.1',
+        'classification': 'capability',
+        'deprecation-risk': 'medium',
+        'evals': [{
+            'name': eval_name,
+            'prompt': f'prompts/{eval_name}.md',
+            'expected': f'expected/{eval_name}.md',
+            'criteria': criteria or ['Must describe lifecycle node states '
+                                     'including configure activate deactivate'],
+            'timeout': 1000,
+        }],
+    }
+    if parity_cfg is not None:
+        cfg['parity_test'] = parity_cfg
+
+    eval_yaml = eval_dir / 'eval.yaml'
+    eval_yaml.write_text(yaml.safe_dump(cfg), encoding='utf-8')
+    return str(eval_dir), str(eval_yaml)
+
+
+class TestContentSourceResolution:
+    """_content_path_for_source maps logical source names to file paths."""
+
+    def test_expected_returns_none(self):
+        # 'expected' is handled by entry['_resolved_expected'], so this
+        # helper returns None for it (and callers use the resolved path).
+        assert _content_path_for_source('/eval', 'qos', 'expected') is None
+
+    def test_output_path(self):
+        p = _content_path_for_source('/eval', 'qos', 'output')
+        assert p.endswith(os.path.join('outputs', 'qos.md'))
+
+    def test_baseline_path(self):
+        p = _content_path_for_source('/eval', 'qos', 'baseline')
+        assert p.endswith(os.path.join('outputs_baseline', 'qos.md'))
+
+
+class TestJudgeMode:
+    """--mode=judge scores user-pasted real model outputs."""
+
+    def test_judge_pass_when_output_addresses_criteria(self, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc',
+            prompt_text='Design a lifecycle node prompt',
+            output_text=(
+                'The lifecycle node should configure, activate, and '
+                'deactivate cleanly with proper state transitions and '
+                'safety guarantees during shutdown.'),
+        )
+        config = load_eval_config(eval_dir)
+        report = run_all_evals(config, eval_dir, content_source='output')
+        assert report['summary']['overall_status'] == 'pass'
+        assert report['content_source'] == 'output'
+
+    def test_judge_skipped_when_output_missing(self, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc',
+            prompt_text='Design a lifecycle node prompt',
+            output_text=None,  # explicitly not captured
+        )
+        config = load_eval_config(eval_dir)
+        report = run_all_evals(config, eval_dir, content_source='output')
+        ev = report['evals'][0]
+        assert ev['status'] == 'skipped'
+        # No-data overall status: not a failure but not a pass either.
+        assert report['summary']['overall_status'] == 'no_data'
+
+    def test_judge_fail_when_output_misses_criteria(self, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc',
+            prompt_text='Design a lifecycle node prompt',
+            output_text='This response is entirely unrelated to the task.',
+            criteria=['Must describe lifecycle node configure activate '
+                      'deactivate transitions with safety'],
+        )
+        config = load_eval_config(eval_dir)
+        report = run_all_evals(config, eval_dir, content_source='output')
+        ev = report['evals'][0]
+        assert ev['status'] == 'fail'
+        assert report['summary']['overall_status'] == 'fail'
+
+    def test_judge_cli_mode_flag(self, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc',
+            prompt_text='Lifecycle prompt',
+            output_text=None,
+        )
+        r = subprocess.run(
+            [sys.executable, EVAL_RUNNER,
+             '--eval-dir', eval_dir, '--mode=judge', '--json'],
+            capture_output=True, text=True,
+        )
+        # Exit 0 because 'no_data' is not a CI failure.
+        assert r.returncode == 0
+        data = json.loads(r.stdout)
+        assert data['content_source'] == 'output'
+        assert data['summary']['overall_status'] == 'no_data'
+        assert data['summary']['skipped'] == 1
+
+
+class TestParityMode:
+    """--parity scores skill ON vs OFF and tracks history."""
+
+    _STRONG_OUTPUT = (
+        'The lifecycle node should configure, activate, and deactivate '
+        'cleanly with proper state transitions, error handling, and '
+        'safety guarantees during shutdown.')
+    _WEAK_BASELINE = (
+        'You should consider lifecycle. The transitions need to be '
+        'reasonable. Make sure you handle errors.')
+
+    def test_parity_delta_positive_when_skill_helps(self, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc',
+            prompt_text='Lifecycle prompt',
+            output_text=self._STRONG_OUTPUT,
+            baseline_text=self._WEAK_BASELINE,
+            criteria=['Must describe lifecycle node states configure '
+                      'activate deactivate safety',
+                      'Must include error handling on transitions'],
+            parity_cfg={'enabled': True, 'threshold': 5.0,
+                        'consecutive_failures_for_deprecation': 3,
+                        'metrics': []},
+        )
+        config = load_eval_config(eval_dir)
+        report = run_parity_test(config, eval_dir)
+        assert report['mode'] == 'parity'
+        assert report['scored_evals'] == 1
+        # ON should score >= OFF; delta non-negative.
+        per = report['per_eval'][0]
+        assert per['status'] == 'scored'
+        assert per['skill_on_pass_rate'] >= per['skill_off_pass_rate']
+
+    def test_parity_skips_eval_when_one_capture_missing(self, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc',
+            prompt_text='Lifecycle prompt',
+            output_text=self._STRONG_OUTPUT,
+            baseline_text=None,  # missing baseline
+        )
+        config = load_eval_config(eval_dir)
+        report = run_parity_test(config, eval_dir)
+        assert report['scored_evals'] == 0
+        assert report['skipped_evals'] == 1
+        assert report['per_eval'][0]['status'] == 'skipped'
+
+    def test_parity_writes_history(self, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc',
+            prompt_text='Lifecycle prompt',
+            output_text=self._STRONG_OUTPUT,
+            baseline_text=self._WEAK_BASELINE,
+        )
+        config = load_eval_config(eval_dir)
+        run_parity_test(config, eval_dir)
+        history_dir = os.path.join(eval_dir, 'history')
+        files = [f for f in os.listdir(history_dir) if f.endswith('.jsonl')]
+        assert len(files) == 1
+        with open(os.path.join(history_dir, files[0]), encoding='utf-8') as fh:
+            entry = json.loads(fh.readline())
+        assert 'avg_delta' in entry
+        assert 'timestamp_utc' in entry
+        assert entry['scored_evals'] == 1
+
+    def test_parity_history_appends_not_overwrites(self, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc',
+            prompt_text='Lifecycle prompt',
+            output_text=self._STRONG_OUTPUT,
+            baseline_text=self._WEAK_BASELINE,
+        )
+        config = load_eval_config(eval_dir)
+        run_parity_test(config, eval_dir)
+        run_parity_test(config, eval_dir)
+        history_dir = os.path.join(eval_dir, 'history')
+        files = [f for f in os.listdir(history_dir) if f.endswith('.jsonl')]
+        with open(os.path.join(history_dir, files[0]), encoding='utf-8') as fh:
+            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+        assert len(lines) == 2
+
+    def test_parity_cli_exits_zero_on_no_data(self, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc',
+            prompt_text='Lifecycle prompt',
+            output_text=None,
+            baseline_text=None,
+        )
+        r = subprocess.run(
+            [sys.executable, EVAL_RUNNER,
+             '--eval-dir', eval_dir, '--parity', '--json'],
+            capture_output=True, text=True,
+        )
+        # All skipped, no deprecation possible -> exit 0.
+        assert r.returncode == 0, r.stdout + r.stderr
+        data = json.loads(r.stdout)
+        assert data['mode'] == 'parity'
+        assert data['deprecation_candidate'] is False
+
+    def test_parity_rejects_combined_with_eval_name(self, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc', prompt_text='x',
+            output_text='y', baseline_text='z',
+        )
+        r = subprocess.run(
+            [sys.executable, EVAL_RUNNER,
+             '--eval-dir', eval_dir, '--parity', '--eval-name', 'lc'],
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 2
+        assert 'parity' in r.stderr.lower()
+
+
+class TestDeprecationStreak:
+    """_check_deprecation_streak flags a skill as a deprecation candidate
+    when the most recent N runs all sit below threshold."""
+
+    def _write_history(self, history_dir, results):
+        """results: list of (timestamp_iso, threshold_met_bool) tuples."""
+        path = os.path.join(history_dir, 'test.jsonl')
+        with open(path, 'w', encoding='utf-8') as fh:
+            for ts, met in results:
+                fh.write(json.dumps({
+                    'timestamp_utc': ts,
+                    'threshold_met': met,
+                }) + '\n')
+
+    def test_three_consecutive_misses_flags_deprecation(self, tmp_path):
+        self._write_history(str(tmp_path), [
+            ('2026-05-01T00:00:00Z', False),
+            ('2026-05-08T00:00:00Z', False),
+            ('2026-05-15T00:00:00Z', False),
+        ])
+        assert _check_deprecation_streak(str(tmp_path), 5.0, 3) is True
+
+    def test_recent_pass_breaks_streak(self, tmp_path):
+        self._write_history(str(tmp_path), [
+            ('2026-05-01T00:00:00Z', False),
+            ('2026-05-08T00:00:00Z', False),
+            ('2026-05-15T00:00:00Z', True),
+        ])
+        assert _check_deprecation_streak(str(tmp_path), 5.0, 3) is False
+
+    def test_insufficient_history_does_not_flag(self, tmp_path):
+        self._write_history(str(tmp_path), [
+            ('2026-05-15T00:00:00Z', False),
+        ])
+        # Only 1 entry, need 3 -> not enough data to declare deprecation.
+        assert _check_deprecation_streak(str(tmp_path), 5.0, 3) is False
+
+    def test_empty_history_does_not_flag(self, tmp_path):
+        assert _check_deprecation_streak(str(tmp_path), 5.0, 3) is False
+
+    def test_uses_most_recent_by_timestamp(self, tmp_path):
+        # File order may not match timestamp order; check_deprecation_streak
+        # must sort by timestamp before slicing.
+        self._write_history(str(tmp_path), [
+            ('2026-05-15T00:00:00Z', True),   # newest, passes -> no streak
+            ('2026-04-15T00:00:00Z', False),
+            ('2026-04-08T00:00:00Z', False),
+            ('2026-04-01T00:00:00Z', False),
+        ])
+        assert _check_deprecation_streak(str(tmp_path), 5.0, 3) is False
+
+
+class TestPrintReportText:
+    """Cover the human-readable report printers (NODATA, skipped, parity)."""
+
+    def test_judge_cli_text_output_shows_nodata(self, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc', prompt_text='x', output_text=None,
+        )
+        r = subprocess.run(
+            [sys.executable, EVAL_RUNNER,
+             '--eval-dir', eval_dir, '--mode=judge'],
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 0
+        assert '[NODATA]' in r.stdout
+        assert '[SKIP]' in r.stdout
+        assert 'Content source: output' in r.stdout
+
+    def test_parity_cli_text_output(self, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc', prompt_text='x',
+            output_text='good answer with configure activate deactivate '
+                        'safety transitions',
+            baseline_text='weak vague hand-wavy non-specific',
+        )
+        r = subprocess.run(
+            [sys.executable, EVAL_RUNNER,
+             '--eval-dir', eval_dir, '--parity'],
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 0
+        assert 'Parity Test' in r.stdout
+        assert 'Average delta' in r.stdout
+        assert 'History file' in r.stdout
+
+    def test_parity_cli_skipped_eval_text(self, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc', prompt_text='x',
+            output_text='captured', baseline_text=None,
+        )
+        r = subprocess.run(
+            [sys.executable, EVAL_RUNNER,
+             '--eval-dir', eval_dir, '--parity'],
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 0
+        assert '[SKIP]' in r.stdout
