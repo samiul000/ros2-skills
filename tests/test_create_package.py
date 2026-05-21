@@ -79,6 +79,54 @@ class TestCppPackage:
         assert "generate_launch_description" in launch
         assert "Copyright" in launch
 
+    def test_lifecycle_launch_imports_alphabetical_per_top_module(self, tmp_path):
+        """ament_flake8 (run by colcon test via ament_lint_auto on cpp
+        packages) enforces flake8-import-order's I100 rule: imports must be
+        alphabetically sorted by module name within each group. A previous
+        revision put `from launch.events import matches_action` AFTER
+        `from launch.substitutions import PathJoinSubstitution`, which I100
+        rejected -> CI Stage 4a failure on Jazzy. Pin the order here so the
+        scaffolder cannot reintroduce the violation.
+        """
+        import ast as _ast
+        run_script("my_robot", "--type", "cpp", "--dest", str(tmp_path))
+        launch_path = (tmp_path / "my_robot" / "launch" / "bringup.launch.py")
+        source = launch_path.read_text(encoding="utf-8")
+        tree = _ast.parse(source)
+        modules = []
+        for node in tree.body:
+            if isinstance(node, _ast.ImportFrom):
+                modules.append(node.module)
+            elif isinstance(node, _ast.Import):
+                for alias in node.names:
+                    modules.append(alias.name)
+        # Group by top-level package and assert each group is sorted.
+        from collections import defaultdict
+        groups = defaultdict(list)
+        order_in_file = list(enumerate(modules))
+        # Preserve in-file order within each top-package group
+        seen_groups_in_order = []
+        for _, m in order_in_file:
+            top = m.split(".")[0]
+            if top not in seen_groups_in_order:
+                seen_groups_in_order.append(top)
+            groups[top].append(m)
+        for top, mods in groups.items():
+            assert mods == sorted(mods), (
+                f"Imports in group '{top}' are not alphabetical "
+                f"(ament_flake8 I100 will fail in CI): got {mods}"
+            )
+        # Also assert the top-level groups themselves appear in the file
+        # in a stable order: launch -> launch_ros -> lifecycle_msgs.
+        # (Group order matters for I100 as well.)
+        expected_group_order = ["launch", "launch_ros", "lifecycle_msgs"]
+        actual_group_order = [g for g in seen_groups_in_order
+                              if g in expected_group_order]
+        assert actual_group_order == expected_group_order, (
+            f"Top-level import groups out of order (ament_flake8 will "
+            f"flag): got {actual_group_order}, want {expected_group_order}"
+        )
+
     def test_lifecycle_launch_uses_matches_action(self, tmp_path):
         """lifecycle_node_matcher must target the specific node, not be truthy-on-anything.
 
