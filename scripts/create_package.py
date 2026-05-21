@@ -77,7 +77,7 @@ from launch.actions import EmitEvent, RegisterEventHandler
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.actions import LifecycleNode
 from launch_ros.event_handlers import OnStateTransition
-from launch_ros.events.lifecycle import ChangeState
+from launch_ros.events.lifecycle import ChangeState, matches_action
 from launch_ros.substitutions import FindPackageShare
 import lifecycle_msgs.msg
 
@@ -94,10 +94,13 @@ def generate_launch_description():
         parameters=[config],
         output='screen',
     )
-    # Auto-configure on launch
+    # Auto-configure on launch. The matcher MUST target this specific node;
+    # a truthy-on-anything matcher would fire ChangeState against every
+    # lifecycle node in the graph (broken in multi-node launches).
+    # matches_action(node) compares by identity to this node only.
     configure_event = EmitEvent(
         event=ChangeState(
-            lifecycle_node_matcher=lambda info: info,
+            lifecycle_node_matcher=matches_action(node),
             transition_id=lifecycle_msgs.msg.Transition.TRANSITION_CONFIGURE,
         )
     )
@@ -109,7 +112,7 @@ def generate_launch_description():
             goal_state='inactive',
             entities=[
                 EmitEvent(event=ChangeState(
-                    lifecycle_node_matcher=lambda info: info,
+                    lifecycle_node_matcher=matches_action(node),
                     transition_id=lifecycle_msgs.msg.Transition.TRANSITION_ACTIVATE,
                 )),
             ],

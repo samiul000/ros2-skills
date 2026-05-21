@@ -79,6 +79,25 @@ class TestCppPackage:
         assert "generate_launch_description" in launch
         assert "Copyright" in launch
 
+    def test_lifecycle_launch_uses_matches_action(self, tmp_path):
+        """lifecycle_node_matcher must target the specific node, not be truthy-on-anything.
+
+        Regression test for the `lambda info: info` bug: that matcher returned
+        the action object (always truthy), causing ChangeState to fire against
+        every lifecycle node in the launch — broken in multi-node bringups.
+        The correct API is launch_ros.events.lifecycle.matches_action(node).
+        """
+        run_script("my_robot", "--type", "cpp", "--dest", str(tmp_path))
+        launch = (tmp_path / "my_robot" / "launch" / "bringup.launch.py").read_text(encoding="utf-8")
+        assert "matches_action" in launch, \
+            "lifecycle launch must use matches_action(node) for lifecycle_node_matcher"
+        assert "matches_action(node)" in launch
+        assert "from launch_ros.events.lifecycle import" in launch \
+            and "matches_action" in launch.split("from launch_ros.events.lifecycle import")[1].split("\n")[0]
+        # The broken pattern must not reappear.
+        assert "lambda info: info" not in launch, \
+            "regression: scaffolder must not emit the truthy-on-anything matcher"
+
     def test_cpp_files_have_copyright(self, tmp_path):
         run_script("my_robot", "--type", "cpp", "--dest", str(tmp_path))
         hpp = (tmp_path / "my_robot" / "include" / "my_robot" / "my_robot_node.hpp").read_text(encoding="utf-8")
