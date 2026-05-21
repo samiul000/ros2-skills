@@ -15,14 +15,17 @@ category: api-reference
 version: 1.1.0
 deprecation-risk: medium
 hooks:
-  Stop:
-    - type: command
-      command: "python3 ${SKILL_ROOT}/scripts/skill_stop_hook.py"
-      timeout: 15000
   PreToolUse:
-    - type: command
-      command: "python3 ${SKILL_ROOT}/scripts/skill_validate_hook.py"
-      timeout: 10000
+    - matcher: "Edit|Write|MultiEdit|Bash"
+      hooks:
+        - type: command
+          command: "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_validate_hook.py"
+          timeout: 10000
+  Stop:
+    - hooks:
+        - type: command
+          command: "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_stop_hook.py"
+          timeout: 15000
 evals:
   - name: qos-compatibility-analysis
     prompt: evals/prompts/qos-compatibility.md

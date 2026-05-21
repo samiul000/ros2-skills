@@ -103,51 +103,118 @@ class TestSkills2FrontmatterHooks:
         assert isinstance(stop_hooks, list)
         assert len(stop_hooks) > 0
 
-    def test_hook_entries_have_required_fields(self):
+    def test_hook_entries_match_claude_code_matcher_group_schema(self):
+        """Claude Code hook frontmatter schema (verified 2026-05-21 against
+        official docs https://code.claude.com/docs/en/hooks):
+
+            hooks:
+              <EventName>:
+                - matcher: "<regex>"   # optional; omit/"*" = all
+                  hooks:
+                    - type: command
+                      command: "..."
+                      timeout: <ms>
+
+        Flat list of {type, command} directly under the event (which earlier
+        revisions of this skill used) is NOT a valid schema and silently
+        fails to register hooks - they become no-op in real Claude Code.
+        """
         hooks = self.fm['hooks']
-        for event, entries in hooks.items():
-            for i, entry in enumerate(entries):
-                assert 'type' in entry, (
-                    f'Hook {event}[{i}] missing "type"'
+        for event, groups in hooks.items():
+            assert isinstance(groups, list), (
+                f'{event} must be a list of matcher groups, got {type(groups)}'
+            )
+            for i, group in enumerate(groups):
+                assert isinstance(group, dict), (
+                    f'{event}[{i}] must be a matcher-group dict'
                 )
-                assert entry['type'] in ('command', 'script'), (
-                    f'Hook {event}[{i}] type must be "command" or "script"'
+                # 'matcher' is optional. 'hooks' (the inner list of handlers)
+                # is required.
+                assert 'hooks' in group, (
+                    f'{event}[{i}] missing inner "hooks" list - '
+                    f'looks like flat schema, will silently no-op'
                 )
-                assert 'command' in entry, (
-                    f'Hook {event}[{i}] missing "command"'
-                )
-                assert isinstance(entry['command'], str)
+                assert isinstance(group['hooks'], list)
+                for j, entry in enumerate(group['hooks']):
+                    assert 'type' in entry, (
+                        f'{event}[{i}].hooks[{j}] missing "type"'
+                    )
+                    assert entry['type'] in ('command', 'script'), (
+                        f'{event}[{i}].hooks[{j}] type must be '
+                        f'"command" or "script"'
+                    )
+                    assert 'command' in entry, (
+                        f'{event}[{i}].hooks[{j}] missing "command"'
+                    )
+                    assert isinstance(entry['command'], str)
+
+    def test_hook_commands_use_valid_path_variables_only(self):
+        """Claude Code documents exactly 3 path placeholders for hook
+        commands: ${CLAUDE_PROJECT_DIR}, ${CLAUDE_PLUGIN_ROOT}, and
+        ${CLAUDE_PLUGIN_DATA}. ${SKILL_ROOT} does NOT exist and is left
+        literal at exec time, making the path invalid.
+        """
+        invalid_vars = ['${SKILL_ROOT}']
+        valid_vars = ['${CLAUDE_PROJECT_DIR}', '${CLAUDE_PLUGIN_ROOT}',
+                      '${CLAUDE_PLUGIN_DATA}']
+        hooks = self.fm['hooks']
+        for event, groups in hooks.items():
+            for i, group in enumerate(groups):
+                for j, entry in enumerate(group.get('hooks', [])):
+                    cmd = entry.get('command', '')
+                    for bad in invalid_vars:
+                        assert bad not in cmd, (
+                            f'{event}[{i}].hooks[{j}] command uses '
+                            f'unrecognized variable {bad!r} - Claude Code '
+                            f'leaves it literal -> file not found at runtime. '
+                            f'Use one of {valid_vars}.'
+                        )
 
     def test_hook_commands_reference_existing_scripts(self):
         hooks = self.fm['hooks']
-        for event, entries in hooks.items():
-            for i, entry in enumerate(entries):
-                cmd = entry['command']
-                # Extract the script path from the command
-                # Handle ${SKILL_ROOT} or ${CLAUDE_PLUGIN_ROOT} variables
-                script_path = cmd.replace(
-                    '${SKILL_ROOT}', SKILL_ROOT
-                ).replace(
-                    '${CLAUDE_PLUGIN_ROOT}', SKILL_ROOT
-                )
-                # Extract the actual file path (after python3/node command)
-                parts = script_path.split()
-                if len(parts) >= 2:
-                    script_file = parts[1]
-                    assert os.path.isfile(script_file), (
-                        f'Hook {event}[{i}] references non-existent script: '
-                        f'{script_file}'
+        for event, groups in hooks.items():
+            for i, group in enumerate(groups):
+                for j, entry in enumerate(group.get('hooks', [])):
+                    cmd = entry['command']
+                    # Resolve documented placeholders against the local repo
+                    # (CLAUDE_PLUGIN_ROOT == skill dir == SKILL_ROOT for our
+                    # purposes during pytest).
+                    script_path = cmd.replace(
+                        '${CLAUDE_PLUGIN_ROOT}', SKILL_ROOT
+                    ).replace(
+                        '${CLAUDE_PROJECT_DIR}', SKILL_ROOT
                     )
+                    parts = script_path.split()
+                    if len(parts) >= 2:
+                        script_file = parts[1]
+                        assert os.path.isfile(script_file), (
+                            f'{event}[{i}].hooks[{j}] references non-existent '
+                            f'script: {script_file}'
+                        )
 
     def test_hooks_have_timeout(self):
         hooks = self.fm['hooks']
-        for event, entries in hooks.items():
-            for i, entry in enumerate(entries):
-                assert 'timeout' in entry, (
-                    f'Hook {event}[{i}] should have a timeout'
+        for event, groups in hooks.items():
+            for i, group in enumerate(groups):
+                for j, entry in enumerate(group.get('hooks', [])):
+                    assert 'timeout' in entry, (
+                        f'{event}[{i}].hooks[{j}] should have a timeout'
+                    )
+                    assert isinstance(entry['timeout'], (int, float))
+                    assert entry['timeout'] > 0
+
+    def test_pretooluse_has_matcher(self):
+        """PreToolUse without a matcher fires on EVERY tool call, which is
+        excessive cost (hook runs on Read, Glob, etc. that have nothing to
+        do with ROS 2). Scope it to file-mutation + shell tools.
+        """
+        hooks = self.fm['hooks']
+        if 'PreToolUse' in hooks:
+            for i, group in enumerate(hooks['PreToolUse']):
+                assert 'matcher' in group, (
+                    f'PreToolUse[{i}] missing matcher - hook will fire on '
+                    f'every tool call. Add matcher: "Edit|Write|Bash|MultiEdit".'
                 )
-                assert isinstance(entry['timeout'], (int, float))
-                assert entry['timeout'] > 0
 
 
 class TestSkills2FrontmatterEvals:
