@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 
+import pytest
 import yaml
 
 SKILL_ROOT = os.path.join(os.path.dirname(__file__), '..')
@@ -33,6 +34,9 @@ from eval_runner import (
     _extract_criteria_with_weights,
     _content_path_for_source,
     _check_deprecation_streak,
+    _print_parity_report,
+    print_report,
+    main as eval_runner_main,
 )
 
 
@@ -1153,3 +1157,221 @@ class TestPrintReportText:
         )
         assert r.returncode == 0
         assert '[SKIP]' in r.stdout
+
+
+class TestPrintParityReportDirect:
+    """Cover _print_parity_report directly (subprocess CLI tests do not
+    increment line coverage for the parent process)."""
+
+    def _base_report(self):
+        return {
+            'skill': 'test', 'version': '0.0.1', 'mode': 'parity',
+            'threshold': 5.0, 'consecutive_failures_for_deprecation': 3,
+            'avg_delta': 7.5, 'threshold_met': True,
+            'deprecation_candidate': False,
+            'scored_evals': 2, 'skipped_evals': 0,
+            'history_file': '/tmp/hist.jsonl',
+            'per_eval': [
+                {'name': 'a', 'status': 'scored',
+                 'skill_on_pass_rate': 90.0, 'skill_off_pass_rate': 80.0,
+                 'delta': 10.0, 'meets_threshold': True},
+                {'name': 'b', 'status': 'scored',
+                 'skill_on_pass_rate': 70.0, 'skill_off_pass_rate': 65.0,
+                 'delta': 5.0, 'meets_threshold': True},
+            ],
+        }
+
+    def test_print_parity_report_threshold_met(self, capsys):
+        _print_parity_report(self._base_report())
+        out = capsys.readouterr().out
+        assert 'Parity Test' in out
+        assert '+7.50%' in out
+        assert '[MET]' in out
+        assert 'a' in out and 'b' in out
+
+    def test_print_parity_report_threshold_miss(self, capsys):
+        r = self._base_report()
+        r['avg_delta'] = 2.0
+        r['threshold_met'] = False
+        r['per_eval'][0]['meets_threshold'] = False
+        _print_parity_report(r)
+        out = capsys.readouterr().out
+        assert '[MISS]' in out
+        assert '+2.00%' in out
+
+    def test_print_parity_report_deprecation_candidate(self, capsys):
+        r = self._base_report()
+        r['deprecation_candidate'] = True
+        r['threshold_met'] = False
+        _print_parity_report(r)
+        out = capsys.readouterr().out
+        assert 'DEPRECATION CANDIDATE' in out
+        assert 'most recent 3 runs' in out
+
+    def test_print_parity_report_with_skipped(self, capsys):
+        r = self._base_report()
+        r['per_eval'].append({
+            'name': 'c', 'status': 'skipped',
+            'reason': 'no output captured yet',
+        })
+        r['skipped_evals'] = 1
+        _print_parity_report(r)
+        out = capsys.readouterr().out
+        assert '[SKIP]' in out
+        assert 'no output captured yet' in out
+
+
+class TestPrintReportDirect:
+    """Cover print_report's NODATA + skipped + parity_test footer branches."""
+
+    def test_print_report_with_skipped_evals(self, capsys):
+        report = {
+            'skill': 's', 'version': '0', 'classification': 'capability',
+            'deprecation_risk': 'medium', 'content_source': 'output',
+            'summary': {
+                'total_evals': 1, 'passed': 0, 'failed': 0,
+                'errors': 0, 'skipped': 1,
+                'average_pass_rate': 0.0,
+                'total_execution_time_ms': 0.0,
+                'overall_status': 'no_data',
+            },
+            'evals': [{
+                'name': 'x', 'status': 'skipped',
+                'reason': 'capture missing',
+                'pass_rate': 0.0, 'execution_time_ms': 0,
+            }],
+            'parity_test': None,
+        }
+        print_report(report)
+        out = capsys.readouterr().out
+        assert '[NODATA]' in out
+        assert '[SKIP] x' in out
+        assert 'capture missing' in out
+        assert 'Content source: output' in out
+
+    def test_print_report_with_parity_footer(self, capsys):
+        report = {
+            'skill': 's', 'version': '0', 'classification': 'capability',
+            'deprecation_risk': 'low', 'content_source': 'expected',
+            'summary': {
+                'total_evals': 1, 'passed': 1, 'failed': 0,
+                'errors': 0, 'skipped': 0,
+                'average_pass_rate': 100.0,
+                'total_execution_time_ms': 12.3,
+                'overall_status': 'pass',
+            },
+            'evals': [{
+                'name': 'x', 'status': 'pass',
+                'pass_rate': 100.0, 'passed_criteria': 3,
+                'total_criteria': 3, 'execution_time_ms': 12.3,
+                'criteria_results': [
+                    {'criterion': 'short', 'passed': True},
+                    {'criterion': 'a' * 80, 'passed': False},  # long, truncated
+                ],
+            }],
+            'parity_test': {
+                'enabled': True, 'threshold': 5.0,
+                'consecutive_failures_for_deprecation': 3,
+            },
+        }
+        print_report(report)
+        out = capsys.readouterr().out
+        assert '[PASS]' in out
+        assert 'Parity Test: enabled' in out
+        assert 'threshold: 5.0' in out
+        # Long criterion should be truncated with ... marker
+        assert '...' in out
+
+
+class TestMainDirectInvocation:
+    """Invoke main() via monkeypatch so coverage tracks the CLI plumbing
+    (subprocess invocations do not propagate coverage to the parent run).
+    """
+
+    def _argv(self, *args):
+        return ['eval_runner.py'] + list(args)
+
+    def test_main_default_text_output(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, 'argv', self._argv('--eval-dir', EVALS_DIR))
+        with pytest.raises(SystemExit) as exc:
+            eval_runner_main()
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert 'Skills 2.0 Eval Report' in out
+        assert '[PASS]' in out
+
+    def test_main_parity_with_temp_eval_dir(self, monkeypatch, capsys, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc', prompt_text='x',
+            output_text='configure activate deactivate safety transitions error',
+            baseline_text='vague nothing useful',
+        )
+        monkeypatch.setattr(
+            sys, 'argv', self._argv('--eval-dir', eval_dir, '--parity'))
+        with pytest.raises(SystemExit) as exc:
+            eval_runner_main()
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert 'Parity Test' in out
+
+    def test_main_parity_json_output(self, monkeypatch, capsys, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc', prompt_text='x',
+            output_text='ok', baseline_text='ok',
+        )
+        monkeypatch.setattr(
+            sys, 'argv',
+            self._argv('--eval-dir', eval_dir, '--parity', '--json'))
+        with pytest.raises(SystemExit):
+            eval_runner_main()
+        out = capsys.readouterr().out
+        data = json.loads(out)
+        assert data['mode'] == 'parity'
+
+    def test_main_parity_rejects_eval_name(self, monkeypatch, capsys, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc', prompt_text='x',
+            output_text='ok', baseline_text='ok',
+        )
+        monkeypatch.setattr(
+            sys, 'argv',
+            self._argv('--eval-dir', eval_dir, '--parity',
+                       '--eval-name', 'lc'))
+        with pytest.raises(SystemExit) as exc:
+            eval_runner_main()
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert 'parity' in err.lower()
+
+    def test_main_judge_mode_with_outputs(self, monkeypatch, capsys, tmp_path):
+        eval_dir, _ = _make_temp_eval_setup(
+            tmp_path, 'lc', prompt_text='x',
+            output_text='configure activate deactivate safety transitions',
+        )
+        monkeypatch.setattr(
+            sys, 'argv', self._argv('--eval-dir', eval_dir, '--mode=judge'))
+        with pytest.raises(SystemExit) as exc:
+            eval_runner_main()
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        # When user supplies outputs, judge mode should produce a real score
+        # (not NODATA).
+        assert '[NODATA]' not in out
+
+    def test_main_invalid_coverage_threshold(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            sys, 'argv',
+            self._argv('--eval-dir', EVALS_DIR, '--min-coverage', '2.0'))
+        with pytest.raises(SystemExit) as exc:
+            eval_runner_main()
+        assert exc.value.code == 2
+        assert 'min-coverage' in capsys.readouterr().err
+
+    def test_main_invalid_pass_rate(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            sys, 'argv',
+            self._argv('--eval-dir', EVALS_DIR, '--min-pass-rate', '-1'))
+        with pytest.raises(SystemExit) as exc:
+            eval_runner_main()
+        assert exc.value.code == 2
+        assert 'min-pass-rate' in capsys.readouterr().err
