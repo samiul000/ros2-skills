@@ -132,8 +132,45 @@ def find_package_xmls(workspace):
     return results
 
 
+def _resolve_workspace():
+    """Pick the workspace path to scan, preferring explicit signals.
+
+    Real Claude Code (verified 2026-05-21) sends Stop-event payloads via
+    stdin including a `cwd` field naming the workspace root. We prefer that
+    over `os.getcwd()` because the hook process may be invoked from a
+    different working directory than the user's actual project root.
+
+    Resolution order:
+      1. SKILL_WORKSPACE env var (explicit override, used by pytest)
+      2. stdin JSON payload `cwd` (real Claude Code)
+      3. CLAUDE_PROJECT_DIR env var (Claude Code sets this for hooks)
+      4. os.getcwd() fallback
+    """
+    explicit = os.environ.get('SKILL_WORKSPACE')
+    if explicit:
+        return explicit
+
+    if not sys.stdin.isatty():
+        try:
+            raw = sys.stdin.read()
+            if raw.strip():
+                payload = json.loads(raw)
+                if isinstance(payload, dict):
+                    cwd = payload.get('cwd')
+                    if cwd and os.path.isdir(cwd):
+                        return cwd
+        except (json.JSONDecodeError, OSError, Exception):  # noqa: BLE001
+            pass
+
+    project_dir = os.environ.get('CLAUDE_PROJECT_DIR')
+    if project_dir and os.path.isdir(project_dir):
+        return project_dir
+
+    return os.getcwd()
+
+
 def main():
-    workspace = os.environ.get('SKILL_WORKSPACE', os.getcwd())
+    workspace = _resolve_workspace()
     all_issues = []
 
     # Validate launch files

@@ -804,3 +804,313 @@ class TestValidateHookMainDirect:
         with _pytest.raises(SystemExit) as exc_info:
             main()
         assert exc_info.value.code == 0
+
+
+class TestClaudeCodeStdinPayload:
+    """Real Claude Code sends the hook payload as JSON on STDIN, not via
+    env vars. Schema verified 2026-05-21 by capturing actual fires::
+
+        {"session_id":..., "cwd":..., "hook_event_name":"PreToolUse",
+         "tool_name":"Bash", "tool_input": {"command": "..."}, ...}
+
+    Note `tool_input` is already a dict, not a JSON string.
+    """
+
+    def _run_stdin(self, payload):
+        return subprocess.run(
+            [sys.executable,
+             os.path.join(SCRIPTS_DIR, 'skill_validate_hook.py')],
+            input=json.dumps(payload),
+            capture_output=True, text=True,
+            # Strip env vars that could short-circuit the stdin path
+            env={k: v for k, v in os.environ.items()
+                 if k not in ('TOOL_NAME', 'TOOL_INPUT')},
+        )
+
+    def test_stdin_bash_destructive_blocks(self):
+        r = self._run_stdin({
+            'session_id': 'test', 'cwd': '/tmp',
+            'hook_event_name': 'PreToolUse',
+            'tool_name': 'Bash',
+            'tool_input': {'command': 'rm -rf /'},
+        })
+        assert r.returncode == 1
+        data = json.loads(r.stdout)
+        assert data['status'] == 'fail'
+        assert data['issues_count'] >= 1
+
+    def test_stdin_powershell_destructive_blocks(self):
+        r = self._run_stdin({
+            'session_id': 'test', 'cwd': '/tmp',
+            'hook_event_name': 'PreToolUse',
+            'tool_name': 'Bash',  # Claude Code surfaces shell calls as Bash
+            'tool_input': {'command': 'Remove-Item -Recurse -Force C:/'},
+        })
+        assert r.returncode == 1
+
+    def test_stdin_edit_antipattern_warns_passes(self):
+        r = self._run_stdin({
+            'session_id': 'test', 'cwd': '/tmp',
+            'hook_event_name': 'PreToolUse',
+            'tool_name': 'Edit',
+            'tool_input': {
+                'file_path': '/tmp/x.py',
+                'old_string': 'pass',
+                'new_string': 'import time\ntime.sleep(1)',
+            },
+        })
+        assert r.returncode == 0  # warning, not blocking
+        data = json.loads(r.stdout)
+        assert data['issues_count'] == 1
+        assert 'time.sleep' in data['issues'][0]['message']
+
+    def test_stdin_multiedit_flattens_all_edits(self):
+        r = self._run_stdin({
+            'session_id': 'test', 'cwd': '/tmp',
+            'hook_event_name': 'PreToolUse',
+            'tool_name': 'MultiEdit',
+            'tool_input': {
+                'file_path': '/tmp/x.py',
+                'edits': [
+                    {'old_string': 'a', 'new_string': 'clean = 1'},
+                    {'old_string': 'b', 'new_string': 'time.sleep(2)'},
+                ],
+            },
+        })
+        # MultiEdit must scan the concatenated new_strings for antipatterns.
+        data = json.loads(r.stdout)
+        assert any('time.sleep' in i['message']
+                   for i in data['issues']), data
+
+    def test_stdin_tool_input_as_dict_not_string(self):
+        # Real Claude Code sends tool_input as object, not a JSON string.
+        # Hook must NOT try to json.loads it a second time.
+        r = self._run_stdin({
+            'tool_name': 'Write',
+            'tool_input': {
+                'file_path': '/tmp/x.py',
+                'content': 'def main(): pass\n',
+            },
+        })
+        assert r.returncode == 0
+        data = json.loads(r.stdout)
+        assert data['status'] == 'pass'
+
+    def test_stdin_empty_input_does_not_crash(self):
+        r = subprocess.run(
+            [sys.executable,
+             os.path.join(SCRIPTS_DIR, 'skill_validate_hook.py')],
+            input='',
+            capture_output=True, text=True,
+            env={k: v for k, v in os.environ.items()
+                 if k not in ('TOOL_NAME', 'TOOL_INPUT')},
+        )
+        assert r.returncode == 0
+        data = json.loads(r.stdout)
+        assert data['status'] == 'pass'
+        assert data['issues_count'] == 0
+
+    def test_stdin_malformed_json_falls_back_safely(self):
+        r = subprocess.run(
+            [sys.executable,
+             os.path.join(SCRIPTS_DIR, 'skill_validate_hook.py')],
+            input='{not valid json',
+            capture_output=True, text=True,
+            env={k: v for k, v in os.environ.items()
+                 if k not in ('TOOL_NAME', 'TOOL_INPUT')},
+        )
+        # Should not crash; falls through to env (which we cleared) so no
+        # tool_name -> no checks run -> pass.
+        assert r.returncode == 0
+
+    def test_stdin_takes_precedence_over_env_for_real_payload(self):
+        r = subprocess.run(
+            [sys.executable,
+             os.path.join(SCRIPTS_DIR, 'skill_validate_hook.py')],
+            input=json.dumps({
+                'tool_name': 'Bash',
+                'tool_input': {'command': 'rm -rf /'},
+            }),
+            capture_output=True, text=True,
+            env={**os.environ,
+                 'TOOL_NAME': 'Write',  # would be safe
+                 'TOOL_INPUT': '{"file_path":"/tmp/x.py","content":"clean"}'},
+        )
+        # Stdin has destructive Bash -> must block, even though env says Write.
+        assert r.returncode == 1
+
+    def test_debug_mode_emits_debug_info(self):
+        r = subprocess.run(
+            [sys.executable,
+             os.path.join(SCRIPTS_DIR, 'skill_validate_hook.py'),
+             '--debug'],
+            input=json.dumps({
+                'tool_name': 'Bash',
+                'tool_input': {'command': 'colcon build'},
+            }),
+            capture_output=True, text=True,
+            env={k: v for k, v in os.environ.items()
+                 if k not in ('TOOL_NAME', 'TOOL_INPUT')},
+        )
+        data = json.loads(r.stdout)
+        assert 'debug' in data
+        assert data['debug']['source'] == 'stdin'
+        assert data['debug']['tool_name'] == 'Bash'
+
+
+class TestStopHookWorkspaceResolution:
+    """Stop hook must pick the workspace from real Claude Code's stdin
+    payload (cwd field) or CLAUDE_PROJECT_DIR env, not just cwd().
+    """
+
+    def _run_stop(self, payload=None, env_overrides=None, cwd=None):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ('SKILL_WORKSPACE', 'CLAUDE_PROJECT_DIR')}
+        if env_overrides:
+            env.update(env_overrides)
+        return subprocess.run(
+            [sys.executable,
+             os.path.join(SCRIPTS_DIR, 'skill_stop_hook.py')],
+            input=json.dumps(payload) if payload else '',
+            capture_output=True, text=True,
+            env=env, cwd=cwd,
+        )
+
+    def test_stdin_cwd_used_when_no_env(self, tmp_path):
+        # Create a fake pkg.xml in tmp_path; stop hook should find it
+        # because it walks the cwd from stdin payload.
+        pkg = tmp_path / 'package.xml'
+        pkg.write_text(
+            '<?xml version="1.0"?><package format="3">'
+            '<name>x</name><license>Apache-2.0</license>'
+            '</package>',
+            encoding='utf-8')
+        r = self._run_stop({'cwd': str(tmp_path),
+                            'hook_event_name': 'Stop'})
+        data = json.loads(r.stdout)
+        # Pass means it scanned + found a clean package.xml.
+        assert data['status'] == 'pass'
+        assert data['issues_count'] == 0
+
+    def test_claude_project_dir_env_used_when_no_stdin(self, tmp_path):
+        # No stdin payload, but CLAUDE_PROJECT_DIR env -> use that.
+        pkg = tmp_path / 'package.xml'
+        pkg.write_text(
+            '<?xml version="1.0"?><package format="3">'
+            '<name>x</name><license>Apache-2.0</license>'
+            '</package>',
+            encoding='utf-8')
+        r = self._run_stop(
+            env_overrides={'CLAUDE_PROJECT_DIR': str(tmp_path)},
+        )
+        data = json.loads(r.stdout)
+        assert data['status'] == 'pass'
+
+    def test_skill_workspace_env_overrides_everything(self, tmp_path):
+        # Even if stdin payload says a different cwd, SKILL_WORKSPACE wins
+        # (used by pytest for hermetic test workspaces).
+        other = tmp_path / 'other'
+        other.mkdir()
+        target = tmp_path / 'target'
+        target.mkdir()
+        r = self._run_stop(
+            payload={'cwd': str(other), 'hook_event_name': 'Stop'},
+            env_overrides={'SKILL_WORKSPACE': str(target)},
+        )
+        # Both dirs are empty (no package.xml/launch) -> clean pass.
+        assert r.returncode == 0
+
+
+class TestReadToolContextDirect:
+    """Cover _read_tool_context branches directly so we can assert the
+    parsing precisely rather than only through CLI surface."""
+
+    def test_env_fallback_with_invalid_json(self, monkeypatch):
+        # Reading the source module directly is required so monkeypatch on
+        # sys.stdin and os.environ takes effect inside the call.
+        sys.path.insert(0, SCRIPTS_DIR)
+        from skill_validate_hook import _read_tool_context
+        import io
+        # Empty stdin -> falls through to env
+        monkeypatch.setattr('sys.stdin', io.StringIO(''))
+        monkeypatch.setenv('TOOL_NAME', 'Bash')
+        monkeypatch.setenv('TOOL_INPUT', '{not valid json')
+        name, data, debug = _read_tool_context()
+        assert name == 'Bash'
+        assert data == {}  # malformed env JSON -> empty dict
+        assert debug['source'] == 'env'
+        assert 'env_parse_error' in debug
+
+    def test_stdin_non_dict_payload_falls_through(self, monkeypatch):
+        sys.path.insert(0, SCRIPTS_DIR)
+        from skill_validate_hook import _read_tool_context
+        import io
+        # Top-level JSON array (not dict) -> ignored, fall through to env
+        monkeypatch.setattr('sys.stdin', io.StringIO('[1, 2, 3]'))
+        monkeypatch.delenv('TOOL_NAME', raising=False)
+        monkeypatch.delenv('TOOL_INPUT', raising=False)
+        name, data, debug = _read_tool_context()
+        assert name == ''
+        assert data == {}
+        # Source falls through to env since stdin payload was unusable.
+        assert debug['source'] == 'env'
+
+    def test_stdin_tool_input_non_dict_normalized_to_empty(self, monkeypatch):
+        # Real Claude Code always sends tool_input as object, but defensively
+        # if a future schema version wraps it (e.g. as string), we must not
+        # crash - we normalize to empty dict.
+        sys.path.insert(0, SCRIPTS_DIR)
+        from skill_validate_hook import _read_tool_context
+        import io
+        monkeypatch.setattr('sys.stdin',
+                            io.StringIO(json.dumps({
+                                'tool_name': 'Bash',
+                                'tool_input': 'should-be-an-object-not-string',
+                            })))
+        monkeypatch.delenv('TOOL_NAME', raising=False)
+        name, data, debug = _read_tool_context()
+        assert name == 'Bash'
+        assert data == {}  # non-dict tool_input normalized
+        assert debug['source'] == 'stdin'
+
+
+class TestResolveWorkspaceDirect:
+    """Cover _resolve_workspace branches directly."""
+
+    def test_falls_back_to_cwd_when_nothing_else(self, monkeypatch, tmp_path):
+        sys.path.insert(0, SCRIPTS_DIR)
+        from skill_stop_hook import _resolve_workspace
+        import io
+        monkeypatch.delenv('SKILL_WORKSPACE', raising=False)
+        monkeypatch.delenv('CLAUDE_PROJECT_DIR', raising=False)
+        monkeypatch.setattr('sys.stdin', io.StringIO(''))
+        monkeypatch.chdir(str(tmp_path))
+        ws = _resolve_workspace()
+        # Resolve via realpath comparison (tmp_path on Windows may have
+        # different drive-letter casing than os.getcwd()).
+        assert os.path.realpath(ws) == os.path.realpath(str(tmp_path))
+
+    def test_stdin_cwd_ignored_if_not_a_directory(self, monkeypatch, tmp_path):
+        sys.path.insert(0, SCRIPTS_DIR)
+        from skill_stop_hook import _resolve_workspace
+        import io
+        monkeypatch.delenv('SKILL_WORKSPACE', raising=False)
+        monkeypatch.delenv('CLAUDE_PROJECT_DIR', raising=False)
+        # Path that does not exist -> falls through.
+        monkeypatch.setattr('sys.stdin', io.StringIO(json.dumps({
+            'cwd': r'C:\definitely\not\a\real\directory\xyz',
+        })))
+        monkeypatch.chdir(str(tmp_path))
+        ws = _resolve_workspace()
+        # Did not honor the bogus cwd; fell through to os.getcwd().
+        assert os.path.realpath(ws) == os.path.realpath(str(tmp_path))
+
+    def test_claude_project_dir_used_when_no_stdin(self, monkeypatch, tmp_path):
+        sys.path.insert(0, SCRIPTS_DIR)
+        from skill_stop_hook import _resolve_workspace
+        import io
+        monkeypatch.delenv('SKILL_WORKSPACE', raising=False)
+        monkeypatch.setenv('CLAUDE_PROJECT_DIR', str(tmp_path))
+        monkeypatch.setattr('sys.stdin', io.StringIO(''))
+        assert os.path.realpath(_resolve_workspace()) == os.path.realpath(
+            str(tmp_path))

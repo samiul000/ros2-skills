@@ -260,10 +260,68 @@ def _check_dangerous_commands(command):
     return issues
 
 
-def main():
-    # Read tool context from environment or stdin
-    tool_input = os.environ.get('TOOL_INPUT', '')
+def _read_tool_context():
+    """Resolve (tool_name, tool_input_dict, debug_info) from the harness.
+
+    Real Claude Code (verified 2026-05-21 by capturing actual hook fires)
+    sends the full hook payload as a JSON object on STDIN, NOT via env vars.
+    The payload shape is::
+
+        {
+          "session_id": "...",
+          "transcript_path": "...",
+          "cwd": "...",
+          "hook_event_name": "PreToolUse",
+          "tool_name": "Bash",
+          "tool_input": { "command": "...", "description": "..." },
+          "tool_use_id": "toolu_..."
+        }
+
+    Note `tool_input` is already a parsed object, NOT a JSON string.
+
+    For backwards-compatible mock testing (the existing pytest suite uses
+    env vars), we fall back to `TOOL_NAME` and `TOOL_INPUT` (where
+    `TOOL_INPUT` is a JSON-encoded string) if stdin is empty or absent.
+    """
+    debug = {'source': None}
+
+    if not sys.stdin.isatty():
+        try:
+            raw = sys.stdin.read()
+        except Exception:  # noqa: BLE001 - stdin read can fail many ways
+            raw = ''
+        if raw.strip():
+            try:
+                payload = json.loads(raw)
+                if isinstance(payload, dict):
+                    debug['source'] = 'stdin'
+                    debug['payload_keys'] = sorted(payload.keys())
+                    tool_name = str(payload.get('tool_name') or '')
+                    tool_input = payload.get('tool_input') or {}
+                    if not isinstance(tool_input, dict):
+                        # Defensive: future schema versions might wrap it.
+                        tool_input = {}
+                    return tool_name, tool_input, debug
+            except json.JSONDecodeError as e:
+                debug['stdin_parse_error'] = str(e)
+
+    debug['source'] = 'env'
     tool_name = os.environ.get('TOOL_NAME', '')
+    raw_env = os.environ.get('TOOL_INPUT', '')
+    tool_input: dict = {}
+    if raw_env:
+        try:
+            parsed = json.loads(raw_env)
+            if isinstance(parsed, dict):
+                tool_input = parsed
+        except json.JSONDecodeError as e:
+            debug['env_parse_error'] = str(e)
+    return tool_name, tool_input, debug
+
+
+def main():
+    debug_mode = '--debug' in sys.argv
+    tool_name, tool_input, debug = _read_tool_context()
 
     issues = []
 
@@ -272,16 +330,26 @@ def main():
     # prefixes (e.g. "write" vs "Write", "mcp__Write", "bash_tool").
     tool_name_lower = tool_name.lower().rstrip('_')
 
-    # If the tool is writing or editing a file, validate the content
-    if tool_name_lower in ('write', 'edit', 'create_file', 'write_file') and tool_input:
-        try:
-            data = json.loads(tool_input)
-            filepath = data.get('file_path', '') or data.get('path', '')
-            content = data.get('content', '') or data.get('new_string', '')
-            if content:
-                issues = check_content(content, filepath)
-        except (json.JSONDecodeError, AttributeError):
-            pass
+    # If the tool is writing or editing a file, validate the content.
+    # NOTE: Claude Code uses tool names: Write, Edit, MultiEdit, NotebookEdit.
+    if tool_name_lower in (
+        'write', 'edit', 'multiedit', 'notebookedit',
+        'create_file', 'write_file',
+    ) and tool_input:
+        filepath = tool_input.get('file_path', '') or tool_input.get('path', '')
+        # MultiEdit carries a list of edits — flatten content checks across them.
+        if tool_name_lower == 'multiedit':
+            content_parts = [
+                e.get('new_string', '')
+                for e in (tool_input.get('edits') or [])
+                if isinstance(e, dict)
+            ]
+            content = '\n'.join(p for p in content_parts if p)
+        else:
+            content = (tool_input.get('content', '')
+                       or tool_input.get('new_string', ''))
+        if content:
+            issues = check_content(content, filepath)
 
     # For shell-style tools, check for dangerous patterns. Includes PowerShell
     # variants so the same regex set protects Windows hosts where the agent's
@@ -289,22 +357,22 @@ def main():
     if tool_name_lower in (
         'bash', 'shell', 'command', 'terminal', 'powershell', 'pwsh', 'cmd',
     ) and tool_input:
-        try:
-            data = json.loads(tool_input)
-            command = data.get('command', '')
+        command = tool_input.get('command', '')
+        if command:
             issues.extend(_check_dangerous_commands(command))
-        except (json.JSONDecodeError, AttributeError):
-            pass
 
     result = {
         'hook': 'ros2-engineering-skills:pre-tool-use',
-        'version': '1.0.0',
+        'version': '1.1.0',
         'issues_count': len(issues),
         'issues': issues,
         'status': 'fail' if any(
             i['severity'] == 'error' for i in issues
         ) else 'pass',
     }
+    if debug_mode:
+        result['debug'] = {**debug, 'tool_name': tool_name,
+                           'tool_input_keys': sorted(tool_input.keys())}
 
     print(json.dumps(result, indent=2))
 
