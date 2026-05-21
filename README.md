@@ -178,14 +178,23 @@ ros2-engineering-skills/
 │   ├── message-types.md            # Message conventions, units, covariance, diagnostics
 │   └── migration-ros1.md           # ROS 1 → ROS 2 strategy, ros1_bridge
 ├── scripts/
-│   ├── create_package.py           # Scaffold a package with best-practice structure (cpp/python/interfaces)
-│   ├── qos_checker.py              # Verify QoS compatibility between pub/sub pairs with fix suggestions
-│   └── launch_validator.py         # AST-based static analysis for Python launch files
+│   ├── create_package.py           # Scaffold a package (cpp/python/interfaces/hardware_interface), --component, --lifecycle, --sros2, --robots N
+│   ├── qos_checker.py              # Verify QoS compatibility between pub/sub pairs with fix suggestions + vendor-specific warnings
+│   ├── launch_validator.py         # AST-based static analysis for Python launch files
+│   ├── rosbag2_qos_checker.py      # Validate QoS compatibility for rosbag2 playback against subscriber profiles
+│   ├── eval_runner.py              # Skills 2.0 eval harness — structural fixture coverage check
+│   ├── skill_validate_hook.py      # Skills 2.0 PreToolUse hook — anti-pattern + dangerous-command guard
+│   └── skill_stop_hook.py          # Skills 2.0 Stop hook — workspace launch/package.xml validation + .skill-runs.log
 ├── tests/
-│   ├── test_create_package.py      # 40 tests — scaffolding, validation, copyright, direct + CLI
-│   ├── test_launch_validator.py    # 38 tests — AST visitors, patterns, CLI, main()
-│   ├── test_qos_checker.py        # 46 tests — parsing, compatibility, presets, CLI, main()
-│   ├── test_qos_property.py       # 13 tests — Hypothesis property-based DDS RxO verification
+│   ├── test_create_package.py      # scaffolding, validation, copyright, lifecycle matcher regression
+│   ├── test_launch_validator.py    # AST visitors, patterns, CLI, main()
+│   ├── test_qos_checker.py         # parsing, compatibility, presets (incl. SKILL.md cross-check), CLI
+│   ├── test_qos_property.py        # Hypothesis property-based DDS RxO verification
+│   ├── test_rosbag2_qos_checker.py # bag metadata parsing, playback QoS compatibility
+│   ├── test_integration.py         # end-to-end multi-script workflows
+│   ├── test_skills2_frontmatter.py # SKILL.md metadata completeness + size budget
+│   ├── test_skills2_evals.py       # eval runner, criteria, fixture coverage
+│   ├── test_skills2_hooks.py       # pre/post hooks, dangerous-command coverage (bash + PowerShell)
 │   └── Dockerfile.ros2-test        # Multi-stage Docker test (build + validate across distros)
 ├── setup.cfg                       # flake8 + mypy configuration
 ├── pytest.ini                      # pytest configuration
@@ -195,14 +204,14 @@ ros2-engineering-skills/
 
 ## Current status
 
-**Complete & Verified.** 20 reference files, 13,000+ lines of production-grade guidance, 3 utility scripts — all tested and **validated on live ROS 2 Jazzy environments.**
+**Complete & Verified.** 20 reference files, 13,000+ lines of production-grade guidance, 7 utility/harness scripts (4 user-facing + 2 Skills 2.0 hooks + 1 eval harness) — all tested and **validated on live ROS 2 Jazzy environments.**
 
 | | |
 |---|---|
-| **398 tests** | Unit + property-based (Hypothesis) + CLI + integration |
-| **94% coverage** | All scripts verified with flake8 + mypy clean |
+| **429 tests** | Unit + property-based (Hypothesis) + CLI + integration + Skills 2.0 hooks/evals + cross-doc consistency |
+| **95% coverage** | All scripts verified with flake8 + mypy clean |
 | **Real-world Evals** | **Validated empirically on WSL (Ubuntu 24.04 + ROS 2 Jazzy)** for SROS2, micro-ROS `rclc`, and Multi-robot fleet scenarios. The `eval_runner.py` performs *structural* checks on prompt/expected fixtures (keyword coverage of declared criteria); model-output quality is evaluated outside this runner. |
-| **4 CI jobs** | Lint, unit-tests, ros2-integration, lint-scripts |
+| **5 CI jobs** | Lint (flake8 + mypy + pip-audit), unit-tests (py 3.10/3.11/3.12 matrix), ros2-integration (humble/jazzy/rolling Docker matrix), markdown-lint, lint-scripts |
 
 ## Supported ROS 2 distributions
 
