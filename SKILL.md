@@ -180,7 +180,7 @@ time and what issues were found — check it to avoid repeating past mistakes.
 | MoveIt 2, planning scene, grasp pipelines         | `references/manipulation.md`     |
 | Camera, LiDAR, PCL, cv_bridge, depth processing   | `references/perception.md`       |
 | Unit tests, integration tests, launch_testing, CI | `references/testing.md`          |
-| ros2 doctor, tracing, profiling, rosbag2          | `references/debugging.md`        |
+| ros2 doctor, tracing, profiling, rosbag2, CLI cheat sheet | `references/debugging.md` |
 | Docker, cross-compile, fleet deployment, OTA      | `references/deployment.md`       |
 | Gazebo, Isaac Sim, sim-to-real, use_sim_time      | `references/simulation.md`       |
 | SROS2, DDS security, certificates, supply chain   | `references/security.md`         |
@@ -489,39 +489,6 @@ When upgrading between distributions, check these breaking changes first:
 
 ## Quick reference — ros2 CLI
 
-```bash
-# Workspace
-colcon build --symlink-install --packages-select my_pkg
-colcon test --packages-select my_pkg
-colcon graph --dot                       # dependency graph (DOT format)
-source install/setup.bash
-
-# Introspection
-ros2 node list
-ros2 topic list -t
-ros2 topic info /topic_name -v          # shows QoS details
-ros2 topic hz /topic_name
-ros2 topic bw /topic_name
-ros2 service list -t
-ros2 action list -t
-ros2 param list /node_name
-ros2 param describe /node_name param
-ros2 interface show std_msgs/msg/String
-
-# ros2_control
-ros2 control list_controllers
-ros2 control list_hardware_interfaces
-ros2 control list_hardware_components
-
-# Debugging
-ros2 doctor --report                    # alias: ros2 wtf
-ros2 run tf2_tools view_frames
-ros2 bag record -a -o my_bag
-ros2 bag info my_bag
-ros2 bag play my_bag --clock
-
-# Lifecycle
-ros2 lifecycle list /node_name
-ros2 lifecycle set /node_name configure
-ros2 lifecycle set /node_name activate
-```
+See **`references/debugging.md` §10 "Quick CLI reference"** for the full
+command cheat sheet (workspace, introspection, ros2_control, debugging,
+lifecycle). Kept out of this always-loaded file to preserve context budget.

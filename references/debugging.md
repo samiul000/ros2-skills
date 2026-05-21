@@ -11,6 +11,7 @@
 7. Network and DDS debugging
 8. Common crash patterns and post-mortem analysis
 9. Common failures and fixes
+10. Quick CLI reference
 
 ---
 
@@ -718,6 +719,48 @@ Fix: Create all subscriptions in constructor/on_configure, never in callbacks
 | Bag playback too fast | Missing `--clock` flag | Add `--clock` and set `use_sim_time: true` on nodes |
 | rqt_graph shows disconnected nodes | Nodes on different DDS domains | Verify `ROS_DOMAIN_ID` is the same on all machines |
 | valgrind reports leaks in rclcpp | Known ROS 2 library allocations (not true leaks) | Suppress ROS 2 internal allocations, focus on your code |
+
+## 10. Quick CLI reference
+
+Commands grouped by task. Most introspection commands also have a `--help`
+that shows distro-specific flags.
+
+```bash
+# Workspace
+colcon build --symlink-install --packages-select my_pkg
+colcon test --packages-select my_pkg
+colcon graph --dot                       # dependency graph (DOT format)
+source install/setup.bash
+
+# Introspection
+ros2 node list
+ros2 topic list -t
+ros2 topic info /topic_name -v          # shows QoS details
+ros2 topic hz /topic_name
+ros2 topic bw /topic_name
+ros2 service list -t
+ros2 action list -t
+ros2 param list /node_name
+ros2 param describe /node_name param
+ros2 interface show std_msgs/msg/String
+
+# ros2_control
+ros2 control list_controllers
+ros2 control list_hardware_interfaces
+ros2 control list_hardware_components
+
+# Debugging
+ros2 doctor --report                    # alias: ros2 wtf
+ros2 run tf2_tools view_frames
+ros2 bag record -a -o my_bag
+ros2 bag info my_bag
+ros2 bag play my_bag --clock
+
+# Lifecycle
+ros2 lifecycle list /node_name
+ros2 lifecycle set /node_name configure
+ros2 lifecycle set /node_name activate
+```
 
 ---
 
