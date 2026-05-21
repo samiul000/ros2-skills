@@ -230,6 +230,23 @@ class TestPresets:
         assert pub.deadline_ms == 500
         assert pub.lifespan_ms == 1000
 
+    def test_command_preset_has_deadline_and_lifespan(self):
+        """Command preset must match SKILL.md Principle 6 Command velocity row.
+
+        SKILL.md declares deadline=100ms and lifespan=200ms for command topics
+        (stale-command protection). The preset previously omitted both, so
+        Claude reading SKILL.md and Claude running `qos_checker.py --preset
+        command` produced different QoS recommendations for the same task.
+        Both pub and sub use the same values: DDS RxO requires offered<=requested
+        for deadline and the symmetric pair keeps the preset self-compatible.
+        """
+        pub = PRESETS["command"]["pub"]
+        sub = PRESETS["command"]["sub"]
+        assert pub.deadline_ms == 100
+        assert pub.lifespan_ms == 200
+        assert sub.deadline_ms == 100
+        assert sub.lifespan_ms == 200
+
     def test_parameter_events_depth(self):
         assert PRESETS["parameter_events"]["pub"].depth == 1000
 
