@@ -400,6 +400,126 @@ class TestDangerousCommandDetection:
     def test_dangerous_patterns_non_empty(self):
         assert len(DANGEROUS_COMMAND_PATTERNS) >= 5
 
+
+class TestPowerShellDangerousCommands:
+    """PowerShell / Windows destructive-command coverage.
+
+    Maintainer works on Windows and `pwsh`/`powershell` invocations can be
+    forwarded under TOOL_NAME=Bash by the harness. The bash-only patterns left
+    the entire Windows surface unguarded — Remove-Item, Format-Volume, etc.
+    slipped through. These checks pin the regression and verify that safe
+    PowerShell operations are not over-matched.
+    """
+
+    def test_remove_item_drive_root(self):
+        issues = _check_dangerous_commands('Remove-Item -Recurse -Force C:/')
+        assert len(issues) >= 1
+        assert any('drive root' in i['message'].lower() for i in issues)
+
+    def test_remove_item_drive_root_backslash(self):
+        issues = _check_dangerous_commands('Remove-Item -Recurse -Force C:\\')
+        assert len(issues) >= 1
+
+    def test_remove_item_flag_order_swapped(self):
+        # PowerShell parameter order is free — -Force first must also be caught.
+        issues = _check_dangerous_commands('Remove-Item -Force -Recurse C:/')
+        assert len(issues) >= 1
+
+    def test_remove_item_case_insensitive(self):
+        # PowerShell cmdlets are case-insensitive.
+        issues = _check_dangerous_commands('remove-item -recurse -force c:/')
+        assert len(issues) >= 1
+
+    def test_remove_item_home(self):
+        for target in ['$HOME', '$env:USERPROFILE', '~']:
+            issues = _check_dangerous_commands(
+                f'Remove-Item -Recurse -Force {target}')
+            assert len(issues) >= 1, f'should flag home target {target!r}'
+
+    def test_remove_item_windows_directories(self):
+        for d in ['Windows', 'Program Files', 'Program Files (x86)', 'Users']:
+            issues = _check_dangerous_commands(
+                f'Remove-Item -Recurse -Force C:/{d}')
+            assert len(issues) >= 1, f'should flag critical dir {d!r}'
+
+    def test_format_volume(self):
+        issues = _check_dangerous_commands('Format-Volume -DriveLetter C')
+        assert len(issues) >= 1
+        assert any('format' in i['message'].lower() for i in issues)
+
+    def test_clear_disk(self):
+        issues = _check_dangerous_commands('Clear-Disk -Number 0 -RemoveData')
+        assert len(issues) >= 1
+        assert any('clear' in i['message'].lower() for i in issues)
+
+    def test_remove_partition(self):
+        issues = _check_dangerous_commands(
+            'Remove-Partition -DriveLetter D -Confirm:$false')
+        assert len(issues) >= 1
+        assert any('partition' in i['message'].lower() for i in issues)
+
+    def test_rmdir_drive_root(self):
+        issues = _check_dangerous_commands('rmdir /s /q C:\\')
+        assert len(issues) >= 1
+
+    def test_safe_powershell_commands_pass(self):
+        safe = [
+            'Get-Item C:/',
+            'Remove-Item C:/Users/me/build',  # specific subdir, not root
+            'Format-Table',                   # not Format-Volume
+            'Get-ChildItem -Recurse -Force',  # no destructive verb
+            'Clear-Host',                     # not Clear-Disk
+            'New-Item -ItemType Directory C:/temp/build',
+        ]
+        for cmd in safe:
+            issues = _check_dangerous_commands(cmd)
+            assert len(issues) == 0, f'safe PS command flagged: {cmd!r}'
+
+
+class TestPowerShellToolName:
+    """The hook must route PowerShell tool invocations through the same
+    dangerous-command pipeline. Previously the tool-name allowlist contained
+    only bash-like aliases, so `TOOL_NAME=PowerShell` skipped the check
+    entirely even when the payload was a destructive command.
+    """
+
+    def _run(self, tool_name, command):
+        tool_input = json.dumps({'command': command})
+        return subprocess.run(
+            [sys.executable,
+             os.path.join(SCRIPTS_DIR, 'skill_validate_hook.py')],
+            capture_output=True, text=True,
+            env={**os.environ,
+                 'TOOL_NAME': tool_name, 'TOOL_INPUT': tool_input},
+        )
+
+    def test_powershell_destructive_blocked(self):
+        result = self._run('PowerShell', 'Remove-Item -Recurse -Force C:/')
+        assert result.returncode == 1, \
+            'PowerShell tool name must route to dangerous-command check'
+        data = json.loads(result.stdout)
+        assert data['status'] == 'fail'
+
+    def test_pwsh_destructive_blocked(self):
+        result = self._run('pwsh', 'Format-Volume -DriveLetter C')
+        assert result.returncode == 1
+        data = json.loads(result.stdout)
+        assert data['status'] == 'fail'
+
+    def test_cmd_destructive_blocked(self):
+        result = self._run('cmd', 'rmdir /s /q C:\\')
+        assert result.returncode == 1
+        data = json.loads(result.stdout)
+        assert data['status'] == 'fail'
+
+    def test_bash_destructive_still_blocked(self):
+        # Regression guard: PowerShell additions must not have weakened the
+        # existing bash branch.
+        result = self._run('Bash', 'rm -rf /')
+        assert result.returncode == 1
+        data = json.loads(result.stdout)
+        assert data['status'] == 'fail'
+
     def test_rm_rf_root_cli(self):
         """Test via CLI that rm -rf / is blocked."""
         tool_input = json.dumps({'command': 'rm -rf /'})

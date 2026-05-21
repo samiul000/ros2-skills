@@ -191,6 +191,58 @@ DANGEROUS_COMMAND_PATTERNS = [
         'pattern': r'>\s*/dev/(sd|nvme|vd|hd)',
         'message': 'Refusing to overwrite block device',
     },
+    # PowerShell / Windows equivalents. Maintainer works on Windows and the
+    # harness may forward `pwsh`/`powershell` commands under TOOL_NAME=Bash
+    # (the agent's logical tool name), so the bash branch can carry PS syntax.
+    # Same best-effort caveat as above: these are not a security boundary.
+    #
+    # Implementation notes:
+    #   * (?i) inline flag — PowerShell cmdlets are case-insensitive
+    #     (`remove-item` == `Remove-Item`).
+    #   * `\b` only attaches to alphanumeric ends; on a hyphen-prefixed flag
+    #     like `-Recurse` the leading `\b` would fail (space → `-` is not a
+    #     word boundary). Lookaheads avoid that trap and also let `-Recurse`
+    #     and `-Force` appear in any order.
+    #   * Drive-root regex requires `:` then `/` or `\` then nothing else
+    #     meaningful, so `C:/Users/me/build` (a real subdir) does NOT match.
+    {
+        'pattern': (r'(?i)\bRemove-Item\b'
+                    r'(?=[^;\n]*\s-Recurse\b)'
+                    r'(?=[^;\n]*\s-Force\b)'
+                    r'[^;\n]*[A-Za-z]:[\\/]\s*(?:["\']?\s*)?(?:[;\n]|$)'),
+        'message': 'Refusing to recursively force-remove a drive root (Remove-Item)',
+    },
+    {
+        'pattern': (r'(?i)\bRemove-Item\b'
+                    r'(?=[^;\n]*\s-Recurse\b)'
+                    r'(?=[^;\n]*\s-Force\b)'
+                    r'[^;\n]*(?:\$HOME|\$env:USERPROFILE|~)\s*'
+                    r'(?:["\']?\s*)?(?:[;\n]|$)'),
+        'message': 'Refusing to recursively force-remove the home directory (Remove-Item)',
+    },
+    {
+        'pattern': (r'(?i)\bRemove-Item\b'
+                    r'(?=[^;\n]*\s-Recurse\b)'
+                    r'(?=[^;\n]*\s-Force\b)'
+                    r'[^;\n]*[A-Za-z]:[\\/](?:Windows|Program Files|Program Files \(x86\)|Users)\b'),
+        'message': 'Refusing to recursively force-remove a critical Windows directory',
+    },
+    {
+        'pattern': r'(?i)\bFormat-Volume\b',
+        'message': 'Refusing to format volume (Format-Volume)',
+    },
+    {
+        'pattern': r'(?i)\bClear-Disk\b',
+        'message': 'Refusing to clear disk (Clear-Disk)',
+    },
+    {
+        'pattern': r'(?i)\bRemove-Partition\b',
+        'message': 'Refusing to remove partition (Remove-Partition)',
+    },
+    {
+        'pattern': r'(?i)\brmdir\b\s+/s\s+/q\s+[A-Za-z]:[\\/]?\s*$',
+        'message': 'Refusing to silently recursively remove drive root (rmdir /s /q)',
+    },
 ]
 
 
@@ -231,8 +283,12 @@ def main():
         except (json.JSONDecodeError, AttributeError):
             pass
 
-    # For Bash tool, check for dangerous patterns
-    if tool_name_lower in ('bash', 'shell', 'command', 'terminal') and tool_input:
+    # For shell-style tools, check for dangerous patterns. Includes PowerShell
+    # variants so the same regex set protects Windows hosts where the agent's
+    # tool name surfaces as `PowerShell`/`pwsh` rather than `Bash`.
+    if tool_name_lower in (
+        'bash', 'shell', 'command', 'terminal', 'powershell', 'pwsh', 'cmd',
+    ) and tool_input:
         try:
             data = json.loads(tool_input)
             command = data.get('command', '')
