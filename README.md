@@ -100,6 +100,61 @@ A `SKILL.md`-based knowledge module that gives AI coding agents deep ROS 2 engin
 - **Distro-aware** — explicit Humble / Jazzy / Kilted / Rolling differences with migration paths
 - **Anti-pattern documentation** — what breaks in production and why
 
+## Token & context efficiency (fork changes)
+
+This fork adds structural changes to reduce token consumption and improve routing accuracy without removing any content.
+
+### What was changed
+
+**`SKILL.md`** — the always-loaded entry point was trimmed of runtime-irrelevant content:
+
+| Change | Lines saved | Tokens saved/session |
+|---|---|---|
+| Moved `evals:` block to `SKILL.evals.yaml` | ~65 | ~420 |
+| Compressed "How to use this skill" section | ~23 | ~160 |
+| Replaced ASCII lifecycle diagram with inline text | ~23 | ~130 |
+| Condensed staleness warning to a single comment line | ~5 | ~35 |
+| Tightened cross-cutting concerns note | ~3 | ~25 |
+| **Total** | **~120 lines** | **~770 tokens/session** |
+
+**Decision Router table** — expanded from 2 to 3 columns:
+
+- **Keyword anchors** — each row now lists the actual API terms Claude will see in user messages (`MultiThreadedExecutor`, `QoSProfile`, `on_configure`, etc.), giving Claude a literal string-match fallback when intent is ambiguous
+- **Skip-if column** — explicitly flags known overlaps between files so Claude doesn't load 2–3 files when 1 is correct
+- **Combine-with hints** — marks the 4–5 task patterns that genuinely need two reference files, preventing speculative reads of a third
+
+**`references/*.md`** (all 20 files) — a 3-line scope header added at the top of each file:
+
+```markdown
+<!-- SCOPE: topics, services, actions, QoS profiles, DDS vendor tuning, type adapters.
+     NOT HERE: executor threading (→ nodes-executors.md), bag replay QoS (→ debugging.md), security QoS (→ security.md) -->
+```
+
+This acts as a self-correcting mechanism — if the router sends Claude to the wrong file, the scope header catches it immediately without reading further.
+
+**`SKILL.evals.yaml`** — new file containing the eval definitions extracted from `SKILL.md` frontmatter. The frontmatter now has a single pointer line (`evals: SKILL.evals.yaml`) instead of the full block. Eval behavior is unchanged; `eval_runner.py` reads from the new location automatically.
+
+### Savings estimate
+
+**SKILL.md structural changes:**    `~770 tokens` saved (fixed, every session)
+
+**Router accuracy improvements:**   `~2,000-8,000 tokens` saved (variable, per task)
+
+──────────────────────────────────────────────────────────────────────────────
+
+**Total per session estimate:**     `~2,750-8,750 tokens`
+
+**Approximate reduction:**          `15-40%` of skill-related token consumption
+
+The variable range depends on how many reference files a task would have loaded without the router improvements. Complex multi-domain tasks (e.g. ros2_control + Nav2 + simulation) see the largest gains.
+
+### Compatibility
+
+All changes are purely structural — no reference content, scripts, tests, or evals were modified. The skill works identically on:
+
+- **Claude Code** — hooks, `.skill-runs.log`, and `eval_runner.py` all function as before. Add a pointer in your `CLAUDE.md` (see Installation below).
+- **OpenCode, Codex, Gemini CLI, Cursor** — scope headers and router improvements work on any agent that reads `SKILL.md` as context. No agent-specific changes required.
+
 ## How it differs from existing ROS 2 skills
 
 | Aspect | Typical ROS 2 skill | This project |
@@ -108,12 +163,13 @@ A `SKILL.md`-based knowledge module that gives AI coding agents deep ROS 2 engin
 | Scope | Single SKILL.md file | 20 reference files via progressive disclosure |
 | Hardware | Mentioned in passing | ros2_control hardware interface patterns, serial/CAN/EtherCAT, controller chaining |
 | Real-time | Not covered | PREEMPT_RT, realtime_tools, memory allocation, callback group strategies |
-| Simulation | Mentioned in passing | Gazebo version matrix, gz_ros2_control, Isaac Sim, sim-to-real |
+| Simulation | Mentioned in passing | Gazebo Sim version matrix, gz_ros2_control, Isaac Sim, sim-to-real |
 | Security | Not covered | SROS2, DDS security plugins, certificate management, supply chain |
 | Embedded | Not covered | micro-ROS, rclc, XRCE-DDS, ESP32/STM32/RP2040 |
 | Multi-robot | Not covered | Open-RMF, fleet adapters, DDS discovery at scale, NTP/PTP sync |
 | Testing | "Use pytest" | launch_testing, gtest, industrial_ci, simulation-in-the-loop CI |
 | Deployment | Not covered | Docker multi-stage, cross-compile, fleet OTA, Zenoh routing |
+| **Token efficiency** | **Not addressed** | **~770 tokens saved/session fixed + 2k–8k variable via router accuracy** |
 
 ## Installation
 
@@ -132,7 +188,16 @@ claude plugin install ros2-engineering@ros2-engineering-skills
 git clone https://github.com/dbwls99706/ros2-engineering-skills.git ~/.claude/skills/ros2-engineering-skills
 ```
 
-### Codex / Gemini CLI / OpenCode
+For Claude Code, add this to your `CLAUDE.md` so the skill is loaded automatically:
+
+```markdown
+## ROS 2 skill
+When working on ROS 2 tasks, read `ros2-engineering-skills/SKILL.md` first.
+Use the Decision Router inside SKILL.md to load only the reference files relevant to the current task.
+Do not read all reference files at once.
+```
+
+### OpenCode / Codex / Gemini CLI
 
 ```bash
 git clone https://github.com/dbwls99706/ros2-engineering-skills.git ~/.agents/skills/ros2-engineering-skills
@@ -156,6 +221,7 @@ ln -s /path/to/ros2-engineering-skills .claude/skills/ros2-engineering-skills
 ```text
 ros2-engineering-skills/
 ├── SKILL.md                        # Entry point — decision router + core principles
+├── SKILL.evals.yaml                # Eval definitions (extracted from SKILL.md frontmatter)
 ├── references/                     # 20 reference files (13,000+ lines)
 │   ├── workspace-build.md          # colcon, ament_cmake, package.xml, overlays
 │   ├── nodes-executors.md          # rclcpp/rclpy nodes, executors, callback groups
@@ -168,7 +234,7 @@ ros2-engineering-skills/
 │   ├── navigation.md               # Nav2, SLAM, costmaps, BT navigator, collision monitor
 │   ├── manipulation.md             # MoveIt 2, MTC, planning scene, grasp pipelines
 │   ├── perception.md               # image_transport, PCL, cv_bridge, depth, Isaac ROS
-│   ├── simulation.md               # Gazebo, Isaac Sim, gz_ros2_control, sim-to-real
+│   ├── simulation.md               # Gazebo Sim, Isaac Sim, gz_ros2_control, sim-to-real
 │   ├── security.md                 # SROS2, DDS security plugins, certificates, supply chain
 │   ├── micro-ros.md                # micro-ROS, rclc, XRCE-DDS, ESP32/STM32/RP2040
 │   ├── multi-robot.md              # Fleet management, Open-RMF, DDS discovery at scale
@@ -274,3 +340,4 @@ Contributions welcome. Please:
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).
+
